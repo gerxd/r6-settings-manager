@@ -7,6 +7,7 @@ Siege keeps one `GameSettings.ini` per Ubisoft profile in `Documents\My Games\Ra
 ## Features
 
 - Settings grouped by category, with sliders, switches and segmented buttons. Search works across all categories.
+- A button that opens a profile ID on R6 Tracker or stats.cc in your browser, so you can find the account name and use it as the label.
 - Keys that have no control in the game menu, such as the sensitivity multipliers and the server region, are marked.
 - A sensitivity calculator with effective sensitivity, cm/360 from your DPI, and a way to change the multiplier while keeping the same feel.
 - An ADS helper that sets every scope at once.
