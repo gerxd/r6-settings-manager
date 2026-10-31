@@ -1,6 +1,6 @@
 # R6 Siege Settings Manager
 
-A Windows desktop app for Rainbow Six Siege settings files. Siege keeps one `GameSettings.ini` per Ubisoft profile in `Documents\My Games\Rainbow Six - Siege\<profile ID>\`. The app shows every profile in one place, gives each one a label, and lets you edit, compare and copy settings between them.
+A Windows desktop app for Rainbow Six Siege settings files, built with PySide6. Siege keeps one `GameSettings.ini` per Ubisoft profile in `Documents\My Games\Rainbow Six - Siege\<profile ID>\`. The app shows every profile in one place, gives each one a label, and lets you edit, compare and copy settings between them.
 
 Download the exe from [Releases](https://github.com/gerxd/r6-settings-manager/releases), or run the script with [uv](https://docs.astral.sh/uv/):
 
@@ -49,9 +49,9 @@ Ubisoft does not document the value encodings. Most lists and scales are checked
 To build the exe:
 
 ```bash
-uv run --no-project --with pyinstaller --with customtkinter --with numpy pyinstaller --noconfirm --onefile --windowed --name "R6 Siege Settings Manager" --collect-data customtkinter r6_siege_settings_manager.py
+uv run --no-project --with pyinstaller --with PySide6-Essentials --with numpy pyinstaller --noconfirm build.spec
 ```
 
 ## License
 
-MIT. This project is not affiliated with Ubisoft. Rainbow Six Siege is a trademark of Ubisoft Entertainment.
+MIT. PySide6 is used under the LGPL. This project is not affiliated with Ubisoft. Rainbow Six Siege is a trademark of Ubisoft Entertainment.

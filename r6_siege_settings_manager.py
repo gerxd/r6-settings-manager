@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["customtkinter>=5.2.2", "numpy>=1.26"]
+# dependencies = ["PySide6-Essentials>=6.7", "numpy>=1.26"]
 # ///
 import argparse
 import codecs
@@ -8,7 +8,6 @@ import ctypes
 import json
 import math
 import os
-import queue
 import re
 import shutil
 import stat
@@ -16,21 +15,25 @@ import subprocess
 import sys
 import threading
 import time
-import tkinter as tk
 import webbrowser
 from collections import Counter, defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from string import Template
 from types import SimpleNamespace
 
-import customtkinter as ctk
 import numpy as np
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QKeySequence, QPainter, QPalette, QPen, QPixmap,
+                           QPolygonF, QShortcut)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QInputDialog, QLabel, QLayout, QLineEdit, QMainWindow, QMenu, QMessageBox,
+                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QStyle,
+                               QStyledItemDelegate, QStyleOptionSlider, QVBoxLayout, QWidget)
 
 APP_NAME = "R6 Siege Settings Manager"
-__version__ = "0.2.1"
+__version__ = "0.3"
 SETTINGS_FILE = "GameSettings.ini"
 MAX_BACKUPS = 50
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -66,13 +69,6 @@ def documents_dir():
             return Path(buf.value)
     return Path.home() / "Documents"
 
-
-if sys.platform == "win32":
-    from ctypes import wintypes
-    _send_message = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)(
-        ("SendMessageW", ctypes.windll.user32))
-    _redraw_window = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)(
-        ("RedrawWindow", ctypes.windll.user32))
 
 DEFAULT_ROOT = documents_dir() / "My Games" / "Rainbow Six - Siege"
 APP_DIR = Path(os.environ.get("R6SM_DATA") or Path(os.environ.get("APPDATA") or Path.home()) / "R6SiegeSettingsManager")
@@ -696,116 +692,758 @@ def parse_bench_html(path):
             "settings": settings, "system": system, "extra": extra}
 
 
-def apply_theme():
-    ctk.set_appearance_mode("dark")
-    t = ctk.ThemeManager.theme
+F = SimpleNamespace()
 
-    def put(widget, **kw):
-        for k, v in kw.items():
-            if widget in t and k in t[widget]:
-                t[widget][k] = v if isinstance(v, (int, float)) else [v, v]
+QSS = Template("""
+QMainWindow, QDialog { background: $bg; }
+QToolTip { background: $card_hi; color: $text; border: 1px solid $line; padding: 4px 8px; }
+QLabel { background: transparent; }
+QLabel[tone="muted"] { color: $muted; }
+QLabel[tone="faint"] { color: $faint; }
+QLabel[tone="accent"] { color: $accent; }
+QLabel[tone="ok"] { color: $ok; }
+QLabel[tone="bad"] { color: $bad; }
+*[role="h1"] { font-size: 22px; font-weight: bold; }
+*[role="h2"] { font-size: 15px; font-weight: bold; }
+*[role="bold"] { font-weight: bold; }
+*[role="small"] { font-size: 12px; }
+*[role="caps"] { font-size: 11px; font-weight: bold; }
+*[role="tile"] { font-size: 24px; font-weight: bold; }
+*[role="mono"] { font-family: Consolas; font-size: 13px; }
+*[role="tiny_mono"] { font-family: Consolas; font-size: 11px; }
 
-    put("CTk", fg_color=COL["bg"])
-    put("CTkToplevel", fg_color=COL["bg"])
-    put("CTkFrame", fg_color=COL["panel"], top_fg_color=COL["card"], border_color=COL["line"])
-    put("CTkButton", fg_color=COL["card_hi"], hover_color=COL["line"], border_color=COL["line"], text_color=COL["text"],
-        corner_radius=8)
-    put("CTkLabel", text_color=COL["text"])
-    put("CTkEntry", fg_color=COL["bg"], border_color=COL["line"], text_color=COL["text"],
-        placeholder_text_color=COL["faint"], corner_radius=8, border_width=1)
-    put("CTkCheckBox", fg_color=COL["accent"], hover_color=COL["accent_hi"], border_color=COL["faint"],
-        checkmark_color=COL["ink"], text_color=COL["text"], corner_radius=6, border_width=2)
-    put("CTkSwitch", fg_color=COL["line"], progress_color=COL["accent"], button_color=COL["text"],
-        button_hover_color="#ffffff", text_color=COL["text"])
-    put("CTkSlider", fg_color=COL["line"], progress_color=COL["accent"], button_color=COL["text"],
-        button_hover_color=COL["accent_hi"])
-    put("CTkSegmentedButton", fg_color=COL["card_hi"], selected_color=COL["accent_deep"],
-        selected_hover_color=COL["accent"], unselected_color=COL["card_hi"], unselected_hover_color=COL["line"],
-        text_color=COL["text"], corner_radius=8)
-    put("CTkOptionMenu", fg_color=COL["card_hi"], button_color=COL["line"], button_hover_color=COL["faint"],
-        text_color=COL["text"], corner_radius=8)
-    put("CTkComboBox", fg_color=COL["bg"], border_color=COL["line"], button_color=COL["line"],
-        button_hover_color=COL["faint"], text_color=COL["text"], corner_radius=8, border_width=1)
-    put("DropdownMenu", fg_color=COL["card_hi"], hover_color=COL["line"], text_color=COL["text"])
-    put("CTkScrollbar", button_color=COL["line"], button_hover_color=COL["faint"])
-    put("CTkTextbox", fg_color=COL["bg"], border_color=COL["line"], text_color=COL["text"],
-        scrollbar_button_color=COL["line"], scrollbar_button_hover_color=COL["faint"], border_width=1)
-    put("CTkScrollableFrame", label_fg_color=COL["card"])
+QPushButton { background: $card_hi; color: $text; border: none; border-radius: 8px; padding: 0 14px; }
+QPushButton:hover { background: $line; }
+QPushButton:pressed { background: $card; padding-top: 2px; }
+QPushButton:disabled { color: $faint; }
+QDialog QPushButton { min-height: 30px; min-width: 72px; }
+QPushButton[kind="primary"] { background: $accent; color: $ink; font-weight: bold; }
+QPushButton[kind="primary"]:hover { background: $accent_hi; }
+QPushButton[kind="primary"]:pressed { background: $accent_deep; }
+QPushButton[kind="primary"]:disabled { background: $card_hi; color: $faint; }
+QPushButton[kind="flat"] { background: transparent; color: $muted; }
+QPushButton[kind="flat"]:hover { background: $card_hi; color: $text; }
+QPushButton[kind="flat"]:disabled { color: $faint; }
+QPushButton[kind="uuid"] { background: transparent; color: $faint; padding: 0 8px; }
+QPushButton[kind="uuid"]:hover { background: $card_hi; color: $muted; }
+QPushButton[kind="step"] { padding: 0; font-size: 15px; }
+QPushButton[kind="step"]:pressed { padding-top: 2px; }
+QPushButton[kind="reset"] { background: transparent; color: $accent; padding: 0; font-size: 16px; }
+QPushButton[kind="reset"]:hover { background: $line; }
+QPushButton[kind="danger"] { background: transparent; color: $bad; border: 1px solid $bad_dim; }
+QPushButton[kind="ghost"] { background: transparent; color: $bad; }
+QPushButton[kind="danger"]:hover, QPushButton[kind="ghost"]:hover { background: $bad_dim; }
+QPushButton[kind="chip"] { background: $line; border-radius: 14px; padding: 0 12px; font-size: 12px; }
+QPushButton[kind="chip"]:hover { background: $bad_dim; }
+QPushButton[kind="quick"] { background: transparent; color: $muted; border: 1px solid $line; border-radius: 12px;
+                            padding: 0 10px; font-size: 12px; }
+QPushButton[kind="quick"]:hover { background: $card_hi; color: $text; }
+QPushButton[kind="nav"] { background: transparent; color: $muted; text-align: left; padding: 0 12px; }
+QPushButton[kind="nav"]:hover { background: $card_hi; }
+QPushButton[kind="nav"][active="true"] { background: $card_hi; color: $text; }
+
+QFrame[seg="choice"] { background: $card_hi; border-radius: 8px; }
+QFrame[seg="choice"] QPushButton, QFrame[seg="tabs"] QPushButton { background: transparent; border-radius: 6px; padding: 0 12px; }
+QFrame[seg="choice"] QPushButton:hover { background: $line; }
+QFrame[seg="tabs"] QPushButton { font-weight: bold; padding: 0 10px; }
+QFrame[seg="tabs"] QPushButton:hover { background: $card_hi; }
+QFrame[seg="choice"] QPushButton:pressed, QFrame[seg="tabs"] QPushButton:pressed { padding-top: 2px; }
+QFrame[seg="choice"] QPushButton:checked, QFrame[seg="tabs"] QPushButton:checked { background: $accent_deep; color: #ffffff; }
+QFrame[seg="choice"] QPushButton:checked:hover, QFrame[seg="tabs"] QPushButton:checked:hover { background: #bd6a1f; }
+
+QLineEdit, QPlainTextEdit { background: $bg; color: $text; border: 1px solid $line; border-radius: 8px; padding: 0 6px;
+                            selection-background-color: $accent_deep; selection-color: #ffffff; }
+QPlainTextEdit { padding: 4px 2px; }
+QDialog QLineEdit { min-height: 30px; }
+QLineEdit:hover, QPlainTextEdit:hover { border-color: $faint; }
+QLineEdit:focus, QPlainTextEdit:focus { border-color: $accent; }
+QLineEdit:disabled { color: $faint; border-color: $card_hi; }
+
+QComboBox { background: $card_hi; color: $text; border: none; border-radius: 8px; padding: 0 28px 0 12px; }
+QComboBox:hover { background: $line; }
+QComboBox:disabled { color: $faint; }
+QComboBox:editable { background: $bg; border: 1px solid $line; padding-left: 4px; }
+QComboBox:editable:hover { border-color: $faint; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox::down-arrow { image: none; width: 0; height: 0; }
+QComboBox QLineEdit { background: transparent; border: none; padding: 0; }
+QComboBox QAbstractItemView { background: $card_hi; color: $text; border: 1px solid $line; padding: 4px; outline: 0; }
+QComboBox QAbstractItemView::item { min-height: 28px; padding: 0 8px; border-radius: 6px; }
+QComboBox QAbstractItemView::item:hover { background: $line; }
+QComboBox QAbstractItemView::item:selected { background: $accent_deep; color: #ffffff; }
+
+QSlider { background: transparent; min-height: 22px; }
+QSlider::groove:horizontal { height: 4px; background: $line; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
+QSlider::sub-page:horizontal:disabled { background: $line; }
+QSlider::handle:horizontal { background: $text; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }
+QSlider::handle:horizontal:hover { background: $accent_hi; }
+QSlider::handle:horizontal:pressed { background: $accent; }
+QSlider::handle:horizontal:disabled { background: $faint; }
+
+QScrollArea { background: transparent; border: none; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: $line; border-radius: 3px; min-height: 32px; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: $line; border-radius: 3px; min-width: 32px; }
+QScrollBar::handle:hover, QScrollBar::handle:pressed { background: $faint; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+
+QMenu { background: $card_hi; color: $text; border: 1px solid $line; padding: 4px; }
+QMenu::item { padding: 6px 24px 6px 12px; border-radius: 6px; }
+QMenu::item:selected { background: $accent_deep; color: #ffffff; }
+QMenu::separator { height: 1px; background: $line; margin: 4px 6px; }
+""")
 
 
-def set_primary(button, enabled):
-    button.configure(state="normal" if enabled else "disabled", fg_color=COL["accent"] if enabled else COL["card_hi"],
-                     text_color_disabled=COL["faint"])
+def font(px, bold=False, family="Segoe UI"):
+    f = QFont(family)
+    f.setPixelSize(px)
+    f.setBold(bold)
+    if family == "Consolas":
+        f.setStyleHint(QFont.Monospace)
+    return f
 
 
-def descendants(widget):
-    out = [widget]
-    for child in widget.winfo_children():
-        out += descendants(child)
-    return out
+def qt_app():
+    app = QApplication.instance()
+    if app is not None:
+        return app
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    pal = QPalette()
+    for role, key in ((QPalette.Window, "bg"), (QPalette.WindowText, "text"), (QPalette.Base, "bg"),
+                      (QPalette.AlternateBase, "card"), (QPalette.Text, "text"), (QPalette.Button, "card_hi"),
+                      (QPalette.ButtonText, "text"), (QPalette.Highlight, "accent_deep"), (QPalette.ToolTipBase, "card_hi"),
+                      (QPalette.ToolTipText, "text"), (QPalette.PlaceholderText, "faint"), (QPalette.Link, "accent"),
+                      (QPalette.Light, "line"), (QPalette.Midlight, "card_hi"), (QPalette.Mid, "line"),
+                      (QPalette.Dark, "bg"), (QPalette.Shadow, "bg")):
+        pal.setColor(role, QColor(COL[key]))
+    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor(COL["faint"]))
+    app.setPalette(pal)
+    app.setFont(font(13))
+    F.__dict__.update(body=font(13), small=font(12), tiny=font(10, True), caps=font(11, True), chart=font(12),
+                      chart_small=font(11))
+    app.setStyleSheet(QSS.substitute(COL))
+    return app
 
 
-def bind_tree(widget, sequence, callback):
-    for w in descendants(widget):
-        tk.Misc.bind(w, sequence, callback, "+")
+def show_msg(parent, kind, text):
+    {"info": QMessageBox.information, "warning": QMessageBox.warning, "error": QMessageBox.critical}[kind](
+        parent, APP_NAME, text)
 
 
-def tk_font(widget, font):
-    s = ctk.ScalingTracker.get_widget_scaling(widget)
-    return font.cget("family"), -round(abs(font.cget("size")) * s), font.cget("weight")
+def ask_yes_no(parent, text):
+    return QMessageBox.question(parent, APP_NAME, text) == QMessageBox.Yes
 
 
-def scroll_ancestor(widget, event):
-    w = widget
-    while w is not None and not isinstance(w, ctk.CTkScrollableFrame):
-        w = w.master
-    if w is not None and w._parent_canvas.yview() != (0.0, 1.0):
-        w._parent_canvas.yview("scroll", -int(event.delta / 6), "units")
+def ask_save(parent, text):
+    answer = QMessageBox.question(parent, APP_NAME, text, QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                                  QMessageBox.Save)
+    return {QMessageBox.Save: True, QMessageBox.Discard: False}.get(answer)
 
 
-class Hover:
-    def hover_bind(self, normal, hot):
-        self._hover_colors = (normal, hot)
-        tk.Frame.bind(self, "<Enter>", lambda e: self.configure(fg_color=self._hover_colors[1]), "+")
-        tk.Frame.bind(self, "<Leave>", self._hover_leave, "+")
-
-    def _hover_leave(self, _event):
-        try:
-            w = self.winfo_containing(*self.winfo_pointerxy())
-        except (KeyError, tk.TclError):
-            w = None
-        if w is None or not str(w).startswith(str(self)):
-            self.configure(fg_color=self._hover_colors[0])
+def ask_text(parent, title, prompt):
+    text, ok = QInputDialog.getText(parent, title, prompt)
+    return text if ok else ""
 
 
-class RepeatButton(ctk.CTkButton):
-    def __init__(self, master, text, action, **kw):
-        super().__init__(master, text=text, width=30, height=30, corner_radius=8, fg_color=COL["card_hi"],
-                         hover_color=COL["line"], text_color=COL["text"], command=None, **kw)
-        self.action, self.job = action, None
-        self.bind("<ButtonPress-1>", self._press)
-        self.bind("<ButtonRelease-1>", self._release)
+def mix(a, b, t):
+    a, b = QColor(a), QColor(b)
+    return QColor(*(round(x + (y - x) * t) for x, y in zip(a.getRgb()[:3], b.getRgb()[:3])))
 
-    def _press(self, _e):
-        if self.cget("state") == "disabled":
-            return
-        self.action()
-        self.job = self.after(380, self._repeat)
+
+def restyle(w, **props):
+    if all(w.property(k) == v for k, v in props.items()):
+        return
+    for k, v in props.items():
+        w.setProperty(k, v)
+    w.style().unpolish(w)
+    w.style().polish(w)
+
+
+def hbox(spacing=6, margins=(0, 0, 0, 0)):
+    lay = QHBoxLayout()
+    lay.setSpacing(spacing)
+    lay.setContentsMargins(*margins)
+    return lay
+
+
+def vbox(spacing=6, margins=(0, 0, 0, 0)):
+    lay = QVBoxLayout()
+    lay.setSpacing(spacing)
+    lay.setContentsMargins(*margins)
+    return lay
+
+
+def discard(w):
+    # Hiding a focused widget sends focus to the next one in the chain, often the sidebar filter.
+    fw = QApplication.focusWidget()
+    if fw is not None and (fw is w or w.isAncestorOf(fw)):
+        fw.clearFocus()
+    w.hide()
+    w.deleteLater()
+
+
+def clear_layout(lay):
+    while lay.count():
+        item = lay.takeAt(0)
+        if item.widget():
+            discard(item.widget())
+        elif item.layout():
+            clear_layout(item.layout())
+            item.layout().deleteLater()
+
+
+def label(text="", role=None, tone=None, wrap=False, width=None, margins=None):
+    w = QLabel(text)
+    w.setTextFormat(Qt.PlainText)
+    if role:
+        w.setProperty("role", role)
+    if tone:
+        w.setProperty("tone", tone)
+    if wrap:
+        w.setWordWrap(True)
+    if width:
+        w.setFixedWidth(width)
+    if margins:
+        w.setContentsMargins(*margins)
+    return w
+
+
+def button(text, command=None, kind=None, width=None, height=30, role=None):
+    b = QPushButton(text)
+    if kind:
+        b.setProperty("kind", kind)
+    if role:
+        b.setProperty("role", role)
+    if width:
+        b.setMinimumWidth(width)
+    b.setFixedHeight(height)
+    b.setCursor(Qt.PointingHandCursor)
+    if command:
+        b.clicked.connect(lambda *_: command())
+    return b
+
+
+def entry(placeholder="", width=None, height=34, role=None, center=False, text=""):
+    e = QLineEdit(text)
+    e.setPlaceholderText(placeholder)
+    if role:
+        e.setProperty("role", role)
+    if width:
+        e.setFixedWidth(width)
+    e.setFixedHeight(height)
+    if center:
+        e.setAlignment(Qt.AlignCenter)
+    return e
+
+
+def scroll_area(margins=(2, 0, 10, 0), spacing=0):
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    area.viewport().setAutoFillBackground(False)
+    area.verticalScrollBar().setSingleStep(24)
+    body = QWidget()
+    lay = vbox(spacing, margins)
+    body.setLayout(lay)
+    area.setWidget(body)
+    body.setAutoFillBackground(False)
+    return area, lay
+
+
+def wheel_steps(acc, fn):
+    while acc >= 120:
+        fn(1)
+        acc -= 120
+    while acc <= -120:
+        fn(-1)
+        acc += 120
+    return acc
+
+
+def text_at(p, x, y, text, color, anchor="c"):
+    fm = p.fontMetrics()
+    w, h = fm.horizontalAdvance(text) + 2, fm.height()
+    left = {"e": x - w, "w": x, "c": x - w / 2}[anchor]
+    p.setPen(QColor(color))
+    p.drawText(QRectF(left, y - h / 2, w, h), Qt.AlignCenter, text)
+
+
+def soft(path):
+    # Zero-width spaces after separators let a long path wrap inside a narrow label.
+    return str(path).replace("\\", "\\​").replace("/", "/​")
+
+
+class Card(QFrame):
+    def __init__(self, bg=None, radius=12, hot=None, border=None, width=0):
+        super().__init__()
+        self.bg, self.radius, self.hot_bg = QColor(bg or COL["card"]), radius, hot
+        self.border, self.border_w = border, width
+        self.hot, self.on_click, self.on_menu = False, None, None
+
+    def set_border(self, color, width):
+        self.border, self.border_w = color, width
+        self.update()
+
+    def enterEvent(self, e):
+        if self.hot_bg:
+            self.hot = True
+            self.update()
+
+    def leaveEvent(self, e):
+        if self.hot:
+            self.hot = False
+            self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.on_click:
+            self.on_click()
+        else:
+            super().mousePressEvent(e)
+
+    def contextMenuEvent(self, e):
+        if self.on_menu:
+            self.on_menu(e.globalPos())
+        else:
+            e.ignore()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = self.border_w
+        p.setPen(QPen(QColor(self.border), w) if w else Qt.NoPen)
+        p.setBrush(QColor(self.hot_bg) if self.hot else self.bg)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(w / 2, w / 2, -w / 2, -w / 2), self.radius, self.radius)
+        self.paint_extra(p)
+
+    def paint_extra(self, p):
+        pass
+
+
+class Pill(QWidget):
+    def __init__(self, text="", bg=None, fg=None, font=None, height=20, radius=6, pad=6):
+        super().__init__()
+        self.font_, self.radius, self.pad = font or F.tiny, radius, pad
+        self.setFixedHeight(height)
+        self.set(text, bg, fg)
+
+    def set(self, text, bg, fg):
+        self.txt, self.bg, self.fg = text, QColor(bg or COL["line"]), QColor(fg or COL["text"])
+        self.setFixedWidth(QFontMetrics(self.font_).horizontalAdvance(text) + 2 * self.pad)
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.bg)
+        p.drawRoundedRect(QRectF(self.rect()), self.radius, self.radius)
+        p.setPen(self.fg)
+        p.setFont(self.font_)
+        p.drawText(self.rect(), Qt.AlignCenter, self.txt)
+
+
+class Dot(QWidget):
+    def __init__(self, size=14):
+        super().__init__()
+        self.setFixedSize(size, size)
+        self.color = QColor(COL["faint"])
+
+    def set_color(self, color):
+        self.color = QColor(color)
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.color)
+        p.drawEllipse(QRectF(self.rect()))
+
+
+class HoverButton(QAbstractButton):
+    def __init__(self):
+        super().__init__()
+        self.setCursor(Qt.PointingHandCursor)
+
+    def enterEvent(self, e):
+        self.update()
+
+    def leaveEvent(self, e):
+        self.update()
+
+
+class Switch(HoverButton):
+    def __init__(self, text="", w=46, h=24, left=False, tone="text"):
+        super().__init__()
+        self.setCheckable(True)
+        self.setText(text)
+        self.tw, self.th, self.left, self.color = w, h, left, QColor(COL[tone])
+        self.pos_ = 0.0
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(120)
+        self.anim.valueChanged.connect(self._step)
+        self.toggled.connect(self._toggled)
+
+    def _toggled(self, on):
+        end = 1.0 if on else 0.0
+        if self.isVisible():
+            self.anim.stop()
+            self.anim.setStartValue(self.pos_)
+            self.anim.setEndValue(end)
+            self.anim.start()
+        else:
+            self.pos_ = end
+            self.update()
+
+    def _step(self, v):
+        self.pos_ = float(v)
+        self.update()
+
+    def sizeHint(self):
+        fm = QFontMetrics(F.small)
+        extra = 50 if self.left else (fm.horizontalAdvance(self.text()) + 10 if self.text() else 0)
+        return QSize(self.tw + extra, max(self.th, fm.height()) + 2)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        x = self.width() - self.tw if self.left else 0
+        y = (self.height() - self.th) / 2
+        if not self.isEnabled():
+            p.setOpacity(0.4)
+        p.setPen(Qt.NoPen)
+        p.setBrush(mix(COL["line"], COL["accent"], self.pos_))
+        p.drawRoundedRect(QRectF(x, y, self.tw, self.th), self.th / 2, self.th / 2)
+        d = self.th - 6
+        p.setBrush(QColor("#ffffff" if self.underMouse() and self.isEnabled() else COL["text"]))
+        p.drawEllipse(QRectF(x + 3 + self.pos_ * (self.tw - self.th), y + 3, d, d))
+        if self.text():
+            p.setPen(self.color)
+            p.setFont(F.small)
+            if self.left:
+                p.drawText(QRectF(0, 0, self.width() - self.tw - 10, self.height()), Qt.AlignRight | Qt.AlignVCenter, self.text())
+            else:
+                p.drawText(QRectF(self.tw + 8, 0, self.width(), self.height()), Qt.AlignLeft | Qt.AlignVCenter, self.text())
+
+
+class Check(HoverButton):
+    def __init__(self, text="", box=20, font=None, color=None):
+        super().__init__()
+        self.setCheckable(True)
+        self.setText(text)
+        self.box, self.font_, self.color = box, font or F.small, QColor(color or COL["text"])
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font_)
+        return QSize(self.box + (fm.horizontalAdvance(self.text()) + 10 if self.text() else 2), max(self.box, fm.height()) + 4)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        b, hot = self.box, self.underMouse()
+        r = QRectF(1, (self.height() - b) / 2 + 1, b - 2, b - 2)
+        if self.isChecked():
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(COL["accent_hi"] if hot else COL["accent"]))
+            p.drawRoundedRect(r, 5, 5)
+            pen = QPen(QColor(COL["ink"]), 2)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawPolyline(QPolygonF([QPointF(r.left() + r.width() * 0.25, r.center().y()),
+                                      QPointF(r.left() + r.width() * 0.43, r.bottom() - r.height() * 0.28),
+                                      QPointF(r.right() - r.width() * 0.22, r.top() + r.height() * 0.28)]))
+        else:
+            p.setPen(QPen(QColor(COL["accent_hi"] if hot else COL["faint"]), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4)
+        if self.text():
+            p.setPen(self.color)
+            p.setFont(self.font_)
+            p.drawText(QRectF(b + 8, 0, self.width(), self.height()), Qt.AlignLeft | Qt.AlignVCenter, self.text())
+
+
+class Swatch(HoverButton):
+    def __init__(self, color, selected):
+        super().__init__()
+        self.color, self.selected = QColor(color), selected
+        self.setFixedSize(28, 28)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        r = QRectF(0.5, 0.5, 27, 27)
+        if self.selected or self.underMouse():
+            p.setBrush(QColor(COL["text"] if self.selected else COL["faint"]))
+            p.drawEllipse(r)
+            r = r.adjusted(3, 3, -3, -3)
+        p.setBrush(self.color)
+        p.drawEllipse(r)
+
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, spacing=6):
+        super().__init__(parent)
+        self.items = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self.items.append(item)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, i):
+        return self.items[i] if 0 <= i < len(self.items) else None
+
+    def takeAt(self, i):
+        return self.items.pop(i) if 0 <= i < len(self.items) else None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._place(QRect(0, 0, width, 0), False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._place(rect, True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self.items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _place(self, rect, apply):
+        x, y, line, sp = rect.x(), rect.y(), 0, self.spacing()
+        for item in self.items:
+            hint = item.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line:
+                x, y, line = rect.x(), y + line + sp, 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + sp
+            line = max(line, hint.height())
+        return y + line - rect.y()
+
+
+class Segmented(QFrame):
+    picked = Signal(str)
+
+    def __init__(self, values=(), kind="choice", height=32):
+        super().__init__()
+        self.setProperty("seg", kind)
+        self.pad = 3 if kind == "choice" else 0
+        self.inner = height - 2 * self.pad
+        self.setFixedHeight(height)
+        self.lay = hbox(2 if kind == "choice" else 4, (self.pad,) * 4)
+        self.setLayout(self.lay)
+        self.buttons, self.value = {}, None
+        self.set_values(values)
+
+    def set_values(self, values):
+        for b in self.buttons.values():
+            self.lay.removeWidget(b)
+            discard(b)
+        self.buttons, self.value = {}, None
+        for v in values:
+            b = QPushButton(v)
+            b.setCheckable(True)
+            b.setFixedHeight(self.inner)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda *_, v=v: self._click(v))
+            self.lay.addWidget(b)
+            self.buttons[v] = b
+
+    def _click(self, v):
+        self.set(v)
+        self.picked.emit(v)
+
+    def set(self, v):
+        self.value = v if v in self.buttons else None
+        for k, b in self.buttons.items():
+            b.setChecked(k == v)
+
+    def get(self):
+        return self.value or ""
+
+
+class Combo(QComboBox):
+    def __init__(self, values=(), width=None, height=32, editable=False, role=None):
+        super().__init__()
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setMaxVisibleItems(18)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        if editable:
+            self.setEditable(True)
+            self.setInsertPolicy(QComboBox.NoInsert)
+        if role:
+            self.setProperty("role", role)
+        if width:
+            self.setFixedWidth(width)
+        self.setFixedHeight(height)
+        self.set_values(values)
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+    def set_values(self, values):
+        old = self.currentText()
+        self.blockSignals(True)
+        self.clear()
+        self.addItems(list(values))
+        self.setCurrentIndex(self.findText(old))
+        self.blockSignals(False)
+
+    def get(self):
+        return self.currentText()
+
+    def set(self, text):
+        self.blockSignals(True)
+        if self.isEditable():
+            self.setEditText(text)
+        else:
+            self.setCurrentIndex(self.findText(text))
+        self.blockSignals(False)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(COL["muted"] if self.isEnabled() else COL["faint"]), 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        x, y = self.width() - 15, self.height() / 2
+        p.drawPolyline(QPolygonF([QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2)]))
+
+
+class RepeatButton(QPushButton):
+    def __init__(self, text, step):
+        super().__init__(text)
+        self.step = step
+        self.setProperty("kind", "step")
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._repeat)
+        self.pressed.connect(self._press)
+        self.released.connect(self.timer.stop)
+
+    def _press(self):
+        self.step()
+        self.timer.start(380)
 
     def _repeat(self):
-        self.action()
-        self.job = self.after(55, self._repeat)
-
-    def _release(self, _e):
-        if self.job:
-            self.after_cancel(self.job)
-            self.job = None
+        if not self.isDown() or not self.isEnabled():
+            self.timer.stop()
+            return
+        self.timer.setInterval(55)
+        self.step()
 
 
-class Control(ctk.CTkFrame):
+class Slider(QSlider):
+    def __init__(self, nudge, steps, width):
+        super().__init__(Qt.Horizontal)
+        self.nudge, self.acc, self.w = nudge, 0, width
+        self.setRange(0, steps)
+        self.setMaximumWidth(width)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def sizeHint(self):
+        return QSize(self.w, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(110, super().minimumSizeHint().height())
+
+    def wheelEvent(self, e):
+        # A plain wheel scrolls the page; only Ctrl+wheel changes the value.
+        if not e.modifiers() & Qt.ControlModifier:
+            e.ignore()
+            return
+        self.acc = wheel_steps(self.acc + e.angleDelta().y(), self.nudge)
+        e.accept()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            handle = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderHandle, self)
+            if not handle.contains(e.position().toPoint()):
+                span = self.width() - handle.width()
+                pos = int(e.position().x() - handle.width() / 2)
+                self.setValue(QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pos, span))
+        super().mousePressEvent(e)
+
+
+class ValueEdit(QLineEdit):
+    def __init__(self, width, on_commit, nudge=None, center=True):
+        super().__init__()
+        self.on_commit, self.nudge, self.acc = on_commit, nudge, 0
+        self.setProperty("role", "mono")
+        self.setFixedSize(width, 30)
+        if center:
+            self.setAlignment(Qt.AlignCenter)
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+        self.editingFinished.connect(lambda: self.on_commit())
+
+    def event(self, e):
+        # Ctrl+Z goes to the app's undo history, not to the text of this field.
+        if e.type() == QEvent.ShortcutOverride and e.matches(QKeySequence.Undo):
+            e.ignore()
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, e):
+        if self.nudge and e.key() in (Qt.Key_Up, Qt.Key_Down):
+            self.nudge(1 if e.key() == Qt.Key_Up else -1)
+            return
+        super().keyPressEvent(e)
+
+    def wheelEvent(self, e):
+        if not self.nudge:
+            e.ignore()
+            return
+        self.acc = wheel_steps(self.acc + e.angleDelta().y(), self.nudge)
+        e.accept()
+
+
+class SearchEdit(QLineEdit):
+    def __init__(self, placeholder, width, on_escape):
+        super().__init__()
+        self.on_escape = on_escape
+        self.setPlaceholderText(placeholder)
+        self.setFixedSize(width, 34)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.on_escape()
+            return
+        super().keyPressEvent(e)
+
+
+class Control(QWidget):
     def __init__(self, row, app, spec):
-        super().__init__(row, fg_color="transparent")
+        super().__init__(row)
         self.row, self.app, self.spec = row, app, spec
+        self.lay = hbox(0)
+        self.setLayout(self.lay)
 
     @property
     def value(self):
@@ -821,23 +1459,20 @@ class Control(ctk.CTkFrame):
 class ToggleControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.var = tk.StringVar(value=self.value)
-        self.state = ctk.CTkLabel(self, text="", width=40, font=app.f.small, text_color=COL["muted"], anchor="e")
-        self.state.pack(side="left", padx=(0, 10))
-        self.switch = ctk.CTkSwitch(self, text="", variable=self.var, onvalue="1", offvalue="0", width=48,
-                                    switch_width=46, switch_height=24, command=self._flip)
-        self.switch.pack(side="left")
-        self.state.bind("<Button-1>", lambda e: self.switch.toggle())
+        self.switch = Switch("", 46, 24, left=True, tone="muted")
+        self.switch.clicked.connect(self._flip)
+        self.lay.addWidget(self.switch)
         self.load()
 
-    def _flip(self):
-        self.emit(self.var.get())
-        self.state.configure(text=self.spec.choices.get(self.var.get(), ""))
+    def _flip(self, *_):
+        v = "1" if self.switch.isChecked() else "0"
+        self.emit(v)
+        self.switch.setText(self.spec.choices.get(v, ""))
 
     def load(self):
         v = self.value
-        self.var.set(v)
-        self.state.configure(text=self.spec.choices.get(v, v))
+        self.switch.setChecked(v == "1")
+        self.switch.setText(self.spec.choices.get(v, v or ""))
 
 
 class ChoiceControl(Control):
@@ -847,11 +1482,12 @@ class ChoiceControl(Control):
         self._ensure(self.value, rebuild=False)
         labels = list(self.options.values())
         if len(labels) <= 6 and sum(map(len, labels)) <= 42:
-            self.widget = ctk.CTkSegmentedButton(self, values=labels, command=self._pick, font=app.f.body, height=32)
+            self.widget = Segmented(labels, "choice", 32)
+            self.widget.picked.connect(self._pick)
         else:
-            self.widget = ctk.CTkOptionMenu(self, values=labels, command=self._pick, width=250, height=32,
-                                            dynamic_resizing=False, font=app.f.body, dropdown_font=app.f.body)
-        self.widget.pack()
+            self.widget = Combo(labels, 250, 32)
+            self.widget.activated.connect(lambda i: self._pick(self.widget.itemText(i)))
+        self.lay.addWidget(self.widget)
         self.load()
 
     def choices(self):
@@ -861,10 +1497,10 @@ class ChoiceControl(Control):
         if v is not None and v not in self.options:
             self.options[v] = f"{v} (custom)"
             if rebuild:
-                self.widget.configure(values=list(self.options.values()))
+                self.widget.set_values(list(self.options.values()))
 
-    def _pick(self, label):
-        self.emit(next(v for v, l in self.options.items() if l == label))
+    def _pick(self, text):
+        self.emit(next(v for v, l in self.options.items() if l == text))
 
     def load(self):
         v = self.value
@@ -879,22 +1515,21 @@ class DataCenterControl(ChoiceControl):
     def load(self):
         self.options = dict(self.choices())
         self._ensure(self.value, rebuild=False)
-        self.widget.configure(values=list(self.options.values()))
+        self.widget.set_values(list(self.options.values()))
         self.widget.set(self.options.get(self.value, ""))
 
 
 class ComboControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.box = ctk.CTkComboBox(self, values=list(spec.choices or {}), width=220, height=32, font=app.f.body,
-                                   dropdown_font=app.f.body, command=lambda v: self.commit())
-        self.box.pack()
-        self.box.bind("<Return>", self.commit)
-        self.box.bind("<FocusOut>", self.commit)
+        self.box = Combo(list(spec.choices or {}), 220, 32, editable=True)
+        self.box.textActivated.connect(lambda _: self.commit())
+        self.box.lineEdit().editingFinished.connect(self.commit)
+        self.lay.addWidget(self.box)
         self.load()
 
-    def commit(self, _e=None):
-        v = self.box.get().strip()
+    def commit(self):
+        v = self.box.currentText().strip()
         if v and v != self.value:
             self.emit(v)
 
@@ -922,39 +1557,29 @@ class RangeControl(Control):
         return lo, hi
 
     def build(self):
-        self.minus = RepeatButton(self, "−", lambda: self.nudge(-1), font=self.app.f.body)
-        self.minus.pack(side="left")
-        steps = max(1, round((self.hi - self.lo) / self.spec.step))
-        self.slider = ctk.CTkSlider(self, from_=self.lo, to=self.hi, number_of_steps=steps, width=self.slider_width,
-                                    height=18, command=self._slide)
-        self.slider.pack(side="left", padx=6)
-        self.slider._canvas.bind("<MouseWheel>", self._slider_wheel)
-        self.plus = RepeatButton(self, "+", lambda: self.nudge(1), font=self.app.f.body)
-        self.plus.pack(side="left")
+        self.minus = RepeatButton("−", lambda: self.nudge(-1))
+        self.lay.addWidget(self.minus)
+        self.steps = max(1, round((self.hi - self.lo) / self.spec.step))
+        self.slider = Slider(self.nudge, self.steps, self.slider_width)
+        self.slider.valueChanged.connect(lambda i: self._slide(self.lo + (self.hi - self.lo) * i / self.steps))
+        self.lay.addSpacing(6)
+        self.lay.addWidget(self.slider)
+        self.lay.addSpacing(6)
+        self.plus = RepeatButton("+", lambda: self.nudge(1))
+        self.lay.addWidget(self.plus)
         self.build_entry()
+        self.build_unit()
 
     def build_entry(self):
-        self.entry = ctk.CTkEntry(self, width=86 if self.spec.digits > 2 else 70, height=30, justify="center",
-                                  font=self.app.f.mono)
-        self.entry.pack(side="left", padx=(8, 0))
-        for seq, fn in (("<Return>", self.commit), ("<FocusOut>", self.commit), ("<Up>", lambda e: self.nudge(1)),
-                        ("<Down>", lambda e: self.nudge(-1)), ("<MouseWheel>", self._entry_wheel)):
-            self.entry.bind(seq, fn)
+        self.entry = ValueEdit(86 if self.spec.digits > 2 else 70, self.commit, self.nudge)
+        self.lay.addSpacing(8)
+        self.lay.addWidget(self.entry)
+
+    def build_unit(self):
         unit = self.spec.unit.strip()
-        self.unit = ctk.CTkLabel(self, text=unit, width=26 if unit else 0, font=self.app.f.small,
-                                 text_color=COL["muted"], anchor="w")
-        self.unit.pack(side="left", padx=(4, 0))
-
-    def _slider_wheel(self, event):
-        if event.state & 0x0004:
-            self.nudge(1 if event.delta > 0 else -1)
-        else:
-            scroll_ancestor(self, event)
-        return "break"
-
-    def _entry_wheel(self, event):
-        self.nudge(1 if event.delta > 0 else -1)
-        return "break"
+        self.unit = label(unit, "small", "muted", width=26 if unit else None)
+        self.lay.addSpacing(4)
+        self.lay.addWidget(self.unit)
 
     def clamp(self, v):
         return min(self.hi, max(self.lo, v))
@@ -967,10 +1592,9 @@ class RangeControl(Control):
         v = (v - self.spec.offset) / self.spec.scale
         return f"{v:.6f}" if self.float_style else str(int(round(v)))
 
-    def show(self, v):
+    def show_value(self, v):
         self.shown = f"{v:.{self.spec.digits}f}"
-        self.entry.delete(0, "end")
-        self.entry.insert(0, self.shown)
+        self.entry.setText(self.shown)
 
     def current(self):
         v = num(self.value)
@@ -978,7 +1602,7 @@ class RangeControl(Control):
 
     def _slide(self, v):
         v = self.clamp(self.snap(v))
-        self.show(v)
+        self.show_value(v)
         self.emit(self.to_file(v))
 
     def nudge(self, direction):
@@ -986,8 +1610,8 @@ class RangeControl(Control):
         self.set_shown(v)
         self.emit(self.to_file(v))
 
-    def commit(self, _e=None):
-        text = self.entry.get().strip()
+    def commit(self):
+        text = self.entry.text().strip()
         if text == self.shown:
             return
         v = num(re.sub(r"[^\d.\-]", "", text))
@@ -998,10 +1622,15 @@ class RangeControl(Control):
         self.set_shown(v)
         self.emit(self.to_file(v))
 
+    def set_slider(self, v):
+        self.slider.blockSignals(True)
+        self.slider.setValue(round((v - self.lo) / (self.hi - self.lo) * self.steps) if self.hi > self.lo else 0)
+        self.slider.blockSignals(False)
+
     def set_shown(self, v):
         if hasattr(self, "slider"):
-            self.slider.set(v)
-        self.show(v)
+            self.set_slider(v)
+        self.show_value(v)
 
     def load(self):
         self.set_shown(self.current())
@@ -1012,13 +1641,13 @@ class NumberControl(RangeControl):
         return -1e12, 1e12
 
     def build(self):
-        self.minus = RepeatButton(self, "−", lambda: self.nudge(-1), font=self.app.f.body)
-        self.minus.pack(side="left")
+        self.minus = RepeatButton("−", lambda: self.nudge(-1))
+        self.lay.addWidget(self.minus)
         self.build_entry()
-        self.unit.pack_forget()
-        self.plus = RepeatButton(self, "+", lambda: self.nudge(1), font=self.app.f.body)
-        self.plus.pack(side="left", padx=(6, 0))
-        self.unit.pack(side="left", padx=(4, 0))
+        self.plus = RepeatButton("+", lambda: self.nudge(1))
+        self.lay.addSpacing(6)
+        self.lay.addWidget(self.plus)
+        self.build_unit()
 
     def snap(self, v):
         return round(v, 6)
@@ -1032,15 +1661,21 @@ class LimitControl(RangeControl):
         return lo, hi
 
     def build(self):
-        self.var = tk.StringVar()
-        self.switch = ctk.CTkSwitch(self, text="", variable=self.var, onvalue="on", offvalue="off", width=48,
-                                    switch_width=46, switch_height=24, command=self._flip)
-        self.switch.pack(side="left", padx=(0, 10))
+        self.switch = Switch("", 46, 24)
+        self.switch.clicked.connect(self._flip)
+        self.lay.addWidget(self.switch)
+        self.lay.addSpacing(10)
         self.last = 144.0
         super().build()
 
-    def _flip(self):
-        self.emit(self.to_file(self.last) if self.var.get() == "on" else "0")
+    def emit(self, value, key=None):
+        v = num(value)
+        if v is not None and v >= self.lo:
+            self.last = v
+        super().emit(value, key)
+
+    def _flip(self, *_):
+        self.emit(self.to_file(self.last) if self.switch.isChecked() else "0")
         self.load()
 
     def current(self):
@@ -1052,53 +1687,41 @@ class LimitControl(RangeControl):
         active = v >= self.lo
         if active:
             self.last = v
-        self.var.set("on" if active else "off")
-        state = "normal" if active else "disabled"
-        for w in (self.slider, self.minus, self.plus):
-            w.configure(state=state)
-        self.slider.set(self.current())
+        self.switch.setChecked(active)
+        for w in (self.slider, self.minus, self.plus, self.entry):
+            w.setEnabled(active)
+        self.set_slider(self.current())
         if active:
-            self.entry.configure(state="normal")
-            self.show(v)
+            self.show_value(v)
         else:
-            self.entry.configure(state="normal")
-            self.entry.delete(0, "end")
-            self.entry.insert(0, "Off")
+            self.entry.setText("Off")
             self.shown = "Off"
-            self.entry.configure(state="disabled")
-
-    def _slide(self, v):
-        self.last = self.clamp(self.snap(v))
-        super()._slide(v)
 
 
 class TextControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.entry = ctk.CTkEntry(self, width=260, height=30, font=app.f.mono)
-        self.entry.pack()
-        self.entry.bind("<Return>", self.commit)
-        self.entry.bind("<FocusOut>", self.commit)
+        self.entry = ValueEdit(260, self.commit, center=False)
+        self.lay.addWidget(self.entry)
         self.load()
 
-    def commit(self, _e=None):
-        if self.entry.get() != self.value:
-            self.emit(self.entry.get())
+    def commit(self):
+        if self.entry.text() != self.value:
+            self.emit(self.entry.text())
 
     def load(self):
-        self.entry.delete(0, "end")
-        self.entry.insert(0, self.value or "")
+        self.entry.setText(self.value or "")
 
 
 class InfoControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.label = ctk.CTkLabel(self, text="", font=app.f.mono, text_color=COL["muted"])
-        self.label.pack()
+        self.info = label("", "mono", "muted")
+        self.lay.addWidget(self.info)
         self.load()
 
     def load(self):
-        self.label.configure(text=self.value or "")
+        self.info.setText(self.value or "")
 
 
 class ResolutionControl(Control):
@@ -1106,38 +1729,40 @@ class ResolutionControl(Control):
 
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.menu = ctk.CTkOptionMenu(self, values=[], command=self._pick, width=190, height=32,
-                                      dynamic_resizing=False, font=app.f.body, dropdown_font=app.f.body)
-        self.menu.pack(side="left")
-        self.aspect = ctk.CTkLabel(self, text="", width=56, font=app.f.small, text_color=COL["muted"])
-        self.aspect.pack(side="left", padx=(10, 0))
+        self.menu = Combo([], 190, 32)
+        self.menu.activated.connect(lambda i: self._pick(self.menu.itemText(i)))
+        self.aspect = label("", "small", "muted", width=56)
+        self.aspect.setAlignment(Qt.AlignCenter)
+        self.lay.addWidget(self.menu)
+        self.lay.addSpacing(10)
+        self.lay.addWidget(self.aspect)
         self.load()
 
-    def size(self):
+    def dims(self):
         return self.app.value(self.spec.sec, "ResolutionWidth") or "0", self.app.value(self.spec.sec, "ResolutionHeight") or "0"
 
     @staticmethod
-    def label(w, h):
+    def res_label(w, h):
         return "Auto" if (w, h) == ("0", "0") else f"{w} × {h}"
 
     def load(self):
-        w, h = self.size()
+        w, h = self.dims()
         modes = sorted({(mw, mh) for mw, mh, _ in self.app.modes}, key=lambda m: (m[0] * m[1], m[0]), reverse=True)
         opts = ["Auto"] + [f"{mw} × {mh}" for mw, mh in modes]
-        cur = self.label(w, h)
+        cur = self.res_label(w, h)
         if cur not in opts:
             opts.insert(1, cur)
-        self.menu.configure(values=opts + [self.CUSTOM])
+        self.menu.set_values(opts + [self.CUSTOM])
         self.menu.set(cur)
-        self.aspect.configure(text=aspect_name(int(num(w) or 0), int(num(h) or 0)))
+        self.aspect.setText(aspect_name(int(num(w) or 0), int(num(h) or 0)))
 
-    def _pick(self, label):
-        if label == "Auto":
+    def _pick(self, text):
+        if text == "Auto":
             w, h = "0", "0"
         else:
-            if label == self.CUSTOM:
-                label = ctk.CTkInputDialog(title="Custom resolution", text="Width x height, for example 1728x1080").get_input() or ""
-            m = re.match(r"\s*(\d{3,5})\s*[x×*, ]\s*(\d{3,5})\s*$", label)
+            if text == self.CUSTOM:
+                text = ask_text(self, "Custom resolution", "Width x height, for example 1728x1080")
+            m = re.match(r"\s*(\d{3,5})\s*[x×*, ]\s*(\d{3,5})\s*$", text)
             if not m:
                 self.load()
                 return
@@ -1150,9 +1775,9 @@ class ResolutionControl(Control):
 class RefreshControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
-        self.menu = ctk.CTkOptionMenu(self, values=[], command=self._pick, width=190, height=32,
-                                      dynamic_resizing=False, font=app.f.body, dropdown_font=app.f.body)
-        self.menu.pack()
+        self.menu = Combo([], 190, 32)
+        self.menu.activated.connect(lambda i: self._pick(self.menu.itemText(i)))
+        self.lay.addWidget(self.menu)
         self.load()
 
     def load(self):
@@ -1162,11 +1787,11 @@ class RefreshControl(Control):
         v = num(self.value)
         cur = "Auto" if not v else next((k for k, x in self.map.items() if abs(x - v) < 1e-6), f"{v:g} Hz")
         self.map.setdefault(cur, v or 0.0)
-        self.menu.configure(values=list(self.map))
+        self.menu.set_values(list(self.map))
         self.menu.set(cur)
 
-    def _pick(self, label):
-        v = self.map[label]
+    def _pick(self, text):
+        v = self.map[text]
         float_style = "." in (self.app.orig.get((self.spec.sec, self.spec.key)) or ".")
         self.emit(f"{v:.6f}" if float_style else str(int(v)))
 
@@ -1186,150 +1811,193 @@ def make_control(row, app, spec):
     return CONTROLS[kind](row, app, spec)
 
 
-class Pill(ctk.CTkLabel):
-    def __init__(self, master, text, fg, color, font):
-        super().__init__(master, text=f" {text} ", fg_color=fg, text_color=color, corner_radius=6, height=20, font=font)
-
-
-class SettingRow(Hover, ctk.CTkFrame):
-    # Text and spacers are plain Tk widgets: a page holds hundreds of rows, and each customtkinter widget adds a
-    # canvas and extra windows that Windows has to paint whenever the page is shown.
-    def __init__(self, master, app, spec):
-        super().__init__(master, fg_color=COL["card"], corner_radius=8)
-        self.app, self.spec, self.bg, self.plain, self.dirty = app, spec, COL["card"], [], False
+class SettingRow(Card):
+    def __init__(self, app, spec, token):
+        super().__init__(COL["card"], 8, COL["card_hi"])
+        self.app, self.spec, self.token, self.dirty = app, spec, token, False
         self.keys = [(spec.sec, spec.key)] + ([(spec.sec, "ResolutionHeight")] if spec.kind == "resolution" else [])
-        s = ctk.ScalingTracker.get_widget_scaling(self)
-        px = lambda v: round(v * s)
-        font = lambda f: tk_font(self, f)
-
-        def plain(cls, parent, **kw):
-            w = cls(parent, bg=self.bg, **kw)
-            self.plain.append(w)
-            return w
-
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(3, minsize=px(40))
-        self.bar = plain(tk.Frame, self, width=px(4))
-        self.bar.grid(row=0, column=0, sticky="ns", padx=(px(4), 0), pady=px(8))
-        text = plain(tk.Frame, self)
-        text.grid(row=0, column=1, sticky="w", padx=(px(10), px(12)), pady=px(7))
-        title = plain(tk.Frame, text)
-        title.pack(anchor="w")
-        plain(tk.Label, title, text=spec.label, font=font(app.f.body), fg=COL["text"]).pack(side="left")
-        key = plain(tk.Label, title if len(spec.label) + len(spec.key) <= 44 else text, text=spec.key,
-                    font=font(app.f.tiny_mono), fg=COL["faint"])
-        key.pack(side="left", padx=(px(8), 0)) if key.master is title else key.pack(anchor="w")
+        lay = hbox(12, (18, 7, 8, 7))
+        self.setLayout(lay)
+        text = vbox(2)
+        title = hbox(8)
+        title.addWidget(label(spec.label))
+        key = label(spec.key, "tiny_mono", "faint")
+        inline = len(spec.label) + len(spec.key) <= 44
+        if inline:
+            title.addWidget(key)
         if spec.ini_only:
-            self.pill = Pill(title, "NOT IN GAME MENU", COL["accent_dim"], COL["accent"], app.f.tiny)
-            self.pill.pack(side="left", padx=(8, 0))
+            title.addWidget(Pill("NOT IN GAME MENU", COL["accent_dim"], COL["accent"]))
+        title.addStretch()
+        text.addLayout(title)
+        if not inline:
+            text.addWidget(key)
         help_text = spec.help or ("" if spec.choices else app.hint(spec))
         if help_text:
-            plain(tk.Label, text, text=help_text, font=font(app.f.small), fg=COL["muted"], justify="left",
-                  wraplength=px(330)).pack(anchor="w")
+            # The help wraps at 330 px. A row layout around it makes the height follow the capped width.
+            h = label(help_text, "small", "muted", wrap=True)
+            h.setMaximumWidth(330)
+            line = hbox(0)
+            line.addWidget(h, 1)
+            line.addStretch()
+            text.addLayout(line)
+        lay.addLayout(text, 1)
         self.control = make_control(self, app, spec)
-        self.control.grid(row=0, column=2, sticky="e", padx=4, pady=6)
-        self.reset = ctk.CTkButton(self, text="↺", width=30, height=30, corner_radius=8, fg_color="transparent",
-                                   hover_color=COL["line"], text_color=COL["accent"], font=app.f.body,
-                                   command=lambda: app.reset_keys(self.keys))
-        self.hover_bind(COL["card"], COL["card_hi"])
-        bind_tree(self, "<Button-3>", self._menu)
+        lay.addWidget(self.control, 0, Qt.AlignVCenter)
+        self.reset = button("↺", lambda: app.reset_keys(self.keys), "reset", height=30)
+        self.reset.setFixedWidth(30)
+        policy = self.reset.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.reset.setSizePolicy(policy)
+        lay.addWidget(self.reset)
+        self.on_menu = lambda pos: app.row_menu(self, pos)
         for k in self.keys:
             app.rows[k].append(self)
         self.mark()
 
-    def configure(self, **kw):
-        if "fg_color" in kw:
-            self.bg = kw["fg_color"]
-            for w in getattr(self, "plain", ()):
-                if w is not self.bar or not self.dirty:
-                    w.configure(bg=self.bg)
-            if getattr(self, "pill", None):
-                self.pill.configure(bg_color=self.bg)
-        super().configure(**kw)
+    def paint_extra(self, p):
+        if self.dirty:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(COL["accent"]))
+            p.drawRoundedRect(QRectF(4, 8, 4, self.height() - 16), 2, 2)
 
     def load(self):
         self.control.load()
 
     def mark(self):
-        self.dirty = any(k in self.app.pending for k in self.keys)
-        self.bar.configure(bg=COL["accent"] if self.dirty else self.bg)
-        if self.dirty:
-            self.reset.grid(row=0, column=3, padx=(2, 8))
-        else:
-            self.reset.grid_remove()
-
-    def _menu(self, event):
-        self.app.row_menu(self, event)
+        dirty = any(k in self.app.pending for k in self.keys)
+        if dirty != self.dirty or self.reset.isHidden() == dirty:
+            self.dirty = dirty
+            self.reset.setVisible(dirty)
+            self.update()
 
 
-class NavItem(ctk.CTkFrame):
-    def __init__(self, master, app, name, command):
-        super().__init__(master, fg_color="transparent", height=38)
-        self.btn = ctk.CTkButton(self, text=name, anchor="w", fg_color="transparent", hover_color=COL["card_hi"],
-                                 text_color=COL["muted"], font=app.f.body, height=38, corner_radius=8, command=command)
-        self.btn.pack(fill="x")
-        self.badge = ctk.CTkLabel(self, text="", width=24, height=20, corner_radius=10, fg_color=COL["accent"],
-                                  text_color=COL["ink"], font=app.f.tiny)
-        self.badge.bind("<Button-1>", lambda e: command())
+class NavItem(QPushButton):
+    def __init__(self, name, command):
+        super().__init__(name)
+        self.setProperty("kind", "nav")
+        self.setFixedHeight(38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.count = 0
+        self.clicked.connect(lambda *_: command())
 
     def set_active(self, on):
-        self.btn.configure(fg_color=COL["card_hi"] if on else "transparent",
-                           text_color=COL["text"] if on else COL["muted"])
+        restyle(self, active="true" if on else "false")
 
     def set_count(self, n):
-        if n:
-            self.badge.configure(text=str(n))
-            self.badge.place(relx=1, rely=0.5, x=-10, anchor="e")
-        else:
-            self.badge.place_forget()
+        if n != self.count:
+            self.count = n
+            self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.count:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(F.tiny)
+        text = str(self.count)
+        w = max(24, p.fontMetrics().horizontalAdvance(text) + 12)
+        r = QRectF(self.width() - 10 - w, (self.height() - 20) / 2, w, 20)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(COL["accent"]))
+        p.drawRoundedRect(r, 10, 10)
+        p.setPen(QColor(COL["ink"]))
+        p.drawText(r, Qt.AlignCenter, text)
 
 
-class ProfileCard(Hover, ctk.CTkFrame):
-    def __init__(self, master, app, profile, selected):
+class ProfileCard(Card):
+    def __init__(self, app, profile, selected):
         meta = app.store.meta(profile.uuid)
-        base = COL["card_hi"] if selected else COL["card"]
-        super().__init__(master, fg_color=base, corner_radius=10, border_width=2 if selected else 0,
-                         border_color=meta["color"])
-        ctk.CTkFrame(self, width=4, height=1, corner_radius=2, fg_color=meta["color"]).pack(side="left", fill="y", padx=(8, 0), pady=10)
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-        top = ctk.CTkFrame(body, fg_color="transparent")
-        top.pack(fill="x")
-        ctk.CTkLabel(top, text=app.store.name(profile.uuid), font=app.f.bold, anchor="w", height=22).pack(side="left")
+        super().__init__(COL["card_hi"] if selected else COL["card"], 10, COL["card_hi"],
+                         meta["color"] if selected else None, 2 if selected else 0)
+        self.color = meta["color"]
+        lay = vbox(3, (24, 8, 10, 9))
+        self.setLayout(lay)
+        top = hbox(6)
+        top.addWidget(label(app.store.name(profile.uuid), "bold"))
+        top.addStretch()
         if profile.locked:
-            Pill(top, "LOCKED", COL["bad_dim"], COL["bad"], app.f.tiny).pack(side="right")
+            top.addWidget(Pill("LOCKED", COL["bad_dim"], COL["bad"]))
+        lay.addLayout(top)
         if meta["tags"]:
-            tags = ctk.CTkFrame(body, fg_color="transparent")
-            tags.pack(fill="x", pady=(3, 1))
+            tags = hbox(4)
             for t in meta["tags"][:3]:
-                Pill(tags, t, COL["line"], COL["text"], app.f.tiny).pack(side="left", padx=(0, 4))
+                tags.addWidget(Pill(t, COL["line"], COL["text"]))
             if len(meta["tags"]) > 3:
-                ctk.CTkLabel(tags, text=f"+{len(meta['tags']) - 3}", font=app.f.tiny, text_color=COL["muted"]).pack(side="left")
+                tags.addWidget(label(f"+{len(meta['tags']) - 3}", "small", "muted"))
+            tags.addStretch()
+            lay.addLayout(tags)
         when = datetime.fromtimestamp(profile.mtime) if profile.mtime else None
-        sub = f"{profile.uuid[:8]}" + (f"  ·  {nice_date(when)}" if when else "")
-        ctk.CTkLabel(body, text=sub, font=app.f.tiny_mono, text_color=COL["faint"], anchor="w", height=16).pack(fill="x")
-        self.hover_bind(base, COL["card_hi"])
-        bind_tree(self, "<Button-1>", lambda e: app.select_profile(profile))
-        bind_tree(self, "<Button-3>", lambda e: app.profile_menu(profile, e))
+        lay.addWidget(label(f"{profile.uuid[:8]}" + (f"  ·  {nice_date(when)}" if when else ""), "tiny_mono", "faint"))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.ClickFocus)
+        self.on_click = lambda: app.select_profile(profile)
+        self.on_menu = lambda pos: app.profile_menu(profile, pos)
+
+    def paint_extra(self, p):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(self.color))
+        p.drawRoundedRect(QRectF(10, 10, 4, self.height() - 20), 2, 2)
 
 
-class LineChart(tk.Canvas):
-    def __init__(self, master, height=300):
-        super().__init__(master, height=height, bg=COL["card"], highlightthickness=0, bd=0)
-        self.series, self.duration = [], 0.0
-        self.font = ("Segoe UI", 9)
-        self.bind("<Configure>", lambda e: self.draw())
-        self.bind("<Motion>", self._hover)
-        self.bind("<Leave>", lambda e: self.delete("hover"))
+class BenchItem(Card):
+    def __init__(self, bench, command):
+        super().__init__(COL["card"], 10, COL["card_hi"])
+        lay = vbox(2, (12, 8, 12, 8))
+        self.setLayout(lay)
+        top = hbox(6)
+        top.addWidget(label(nice_date(bench.when), "bold"))
+        top.addStretch()
+        fps = bench.stats.get("Fps")
+        top.addWidget(label(f"{fps:.0f} fps" if fps else "", "bold", "accent"))
+        lay.addLayout(top)
+        lo, hi = bench.stats.get("LowestFps"), bench.stats.get("HighestFps")
+        lay.addWidget(label(f"low {lo:.0f}  ·  high {hi:.0f}" if lo is not None and hi is not None else "", "small", "muted"))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.ClickFocus)
+        self.on_click = command
+
+    def set_selected(self, on):
+        self.set_border(COL["accent"] if on else None, 2 if on else 0)
+
+
+class Toast(QFrame):
+    def __init__(self, parent, text, bg, fg):
+        super().__init__(parent)
+        self.bg, self.fg = QColor(bg), QColor(fg)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lay = hbox(0, (16, 9, 16, 9))
+        self.setLayout(lay)
+        lab = label(text, wrap=True)
+        lab.setStyleSheet(f"color: {fg};")
+        lab.setFixedWidth(min(460, QFontMetrics(F.body).horizontalAdvance(text) + 6))
+        lay.addWidget(lab)
+        self.adjustSize()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(self.fg, 1))
+        p.setBrush(self.bg)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+
+
+class LineChart(QWidget):
+    def __init__(self, height=300):
+        super().__init__()
+        self.setFixedHeight(height)
+        self.setMouseTracking(True)
+        self.series, self.duration, self.max, self.mx, self.base = [], 0.0, {}, None, None
 
     def plot(self, series, duration):
         self.series = [s for s in series if len(s["y"])]
         self.duration = duration or 0.0
-        self.draw()
+        self.base = None
+        self.update()
 
     def frame(self):
         right = any(s["axis"] == "r" for s in self.series)
-        return 48, 30, self.winfo_width() - (48 if right else 18), self.winfo_height() - 28
+        return 48, 30, self.width() - (48 if right else 18), self.height() - 28
 
     @staticmethod
     def nice(v):
@@ -1338,146 +2006,182 @@ class LineChart(tk.Canvas):
         e = 10 ** math.floor(math.log10(v))
         return next(m * e for m in (1, 2, 2.5, 5, 10) if v <= m * e)
 
-    def draw(self):
-        self.delete("all")
+    def resizeEvent(self, e):
+        self.base = None
+
+    def mouseMoveEvent(self, e):
+        self.mx = e.position().x()
+        self.update()
+
+    def leaveEvent(self, e):
+        self.mx = None
+        self.update()
+
+    def paintEvent(self, e):
+        # The plot is cached in a pixmap so the hover crosshair repaints cheaply.
+        if self.base is None:
+            dpr = self.devicePixelRatioF()
+            self.base = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+            self.base.setDevicePixelRatio(dpr)
+            self.base.fill(QColor(COL["card"]))
+            bp = QPainter(self.base)
+            self.draw(bp)
+            bp.end()
+        p = QPainter(self)
+        p.drawPixmap(0, 0, self.base)
+        if self.mx is not None:
+            self.draw_hover(p, self.mx)
+
+    def draw(self, p):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(F.chart)
+        self.max = {}
         x0, y0, x1, y1 = self.frame()
         if x1 - x0 < 60:
             return
         if not self.series:
-            self.create_text((x0 + x1) / 2, (y0 + y1) / 2, text="No samples in this report", fill=COL["muted"], font=self.font)
+            text_at(p, (x0 + x1) / 2, (y0 + y1) / 2, "No samples in this report", COL["muted"])
             return
-        self.max = {}
         for axis in ("l", "r"):
             ys = [s["y"].max() for s in self.series if s["axis"] == axis]
             self.max[axis] = self.nice(max(ys) * 1.05) if ys else None
+        p.setPen(QPen(QColor(COL["line"]), 1))
         for i in range(5):
             y = y1 - (y1 - y0) * i / 4
-            self.create_line(x0, y, x1, y, fill=COL["line"])
+            p.drawLine(QPointF(x0, y), QPointF(x1, y))
+        for i in range(5):
+            y = y1 - (y1 - y0) * i / 4
             if self.max["l"]:
-                self.create_text(x0 - 8, y, text=f"{self.max['l'] * i / 4:g}", anchor="e", fill=COL["muted"], font=self.font)
+                text_at(p, x0 - 8, y, f"{self.max['l'] * i / 4:g}", COL["muted"], "e")
             if self.max["r"]:
-                self.create_text(x1 + 8, y, text=f"{self.max['r'] * i / 4:g}", anchor="w", fill=COL["muted"], font=self.font)
+                text_at(p, x1 + 8, y, f"{self.max['r'] * i / 4:g}", COL["muted"], "w")
         for i in range(6):
-            x = x0 + (x1 - x0) * i / 5
-            self.create_text(x, y1 + 14, text=f"{self.duration * i / 5:.0f} s", fill=COL["muted"], font=self.font)
-        lx = x0
+            text_at(p, x0 + (x1 - x0) * i / 5, y1 + 14, f"{self.duration * i / 5:.0f} s", COL["muted"])
+        lx, fm = x0, p.fontMetrics()
         for s in self.series:
             n = len(s["y"])
-            xs = np.linspace(x0, x1, n)
-            ys = y1 - s["y"] / self.max[s["axis"]] * (y1 - y0)
-            coords = np.column_stack([xs, ys]).ravel().tolist()
             if n > 1:
-                self.create_line(*coords, fill=s["color"], width=s.get("width", 2), dash=s.get("dash"))
-            self.create_rectangle(lx, 9, lx + 10, 19, fill=s["color"], outline="")
-            t = self.create_text(lx + 16, 14, text=s["label"], anchor="w", fill=COL["text"], font=self.font)
-            lx = self.bbox(t)[2] + 18
+                xs = np.linspace(x0, x1, n)
+                ys = y1 - s["y"] / self.max[s["axis"]] * (y1 - y0)
+                pen = QPen(QColor(s["color"]), s.get("width", 2))
+                pen.setJoinStyle(Qt.RoundJoin)
+                if s.get("dash"):
+                    pen.setDashPattern([d / pen.widthF() for d in s["dash"]])
+                p.setPen(pen)
+                p.drawPolyline(QPolygonF([QPointF(a, b) for a, b in zip(xs.tolist(), ys.tolist())]))
+            p.fillRect(QRectF(lx, 9, 10, 10), QColor(s["color"]))
+            text_at(p, lx + 16, 14, s["label"], COL["text"], "w")
+            lx += 16 + fm.horizontalAdvance(s["label"]) + 18
 
-    def _hover(self, event):
-        self.delete("hover")
-        if not self.series or not getattr(self, "max", None):
+    def draw_hover(self, p, mx):
+        if not self.series or not self.max:
             return
         x0, y0, x1, y1 = self.frame()
-        if not x0 <= event.x <= x1:
+        if not x0 <= mx <= x1:
             return
-        frac = (event.x - x0) / (x1 - x0)
-        self.create_line(event.x, y0, event.x, y1, fill=COL["faint"], dash=(2, 3), tags="hover")
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(F.chart)
+        frac = (mx - x0) / (x1 - x0)
+        pen = QPen(QColor(COL["faint"]), 1)
+        pen.setDashPattern([2, 3])
+        p.setPen(pen)
+        p.drawLine(QPointF(mx, y0), QPointF(mx, y1))
         lines = [f"{frac * self.duration:.1f} s"]
         for s in self.series:
-            i = round(frac * (len(s["y"]) - 1))
-            v = s["y"][i]
+            v = float(s["y"][round(frac * (len(s["y"]) - 1))])
             y = y1 - v / self.max[s["axis"]] * (y1 - y0)
-            self.create_oval(event.x - 4, y - 4, event.x + 4, y + 4, fill=s["color"], outline=COL["card"], width=2, tags="hover")
+            p.setPen(QPen(QColor(COL["card"]), 2))
+            p.setBrush(QColor(s["color"]))
+            p.drawEllipse(QPointF(mx, y), 4, 4)
             lines.append(f"{s['label']}: {v:.1f}{s['unit']}")
-        tx = event.x + 14 if event.x < (x0 + x1) / 2 else event.x - 14
-        t = self.create_text(tx, y0 + 10, text="\n".join(lines), anchor="nw" if tx > event.x else "ne",
-                             fill=COL["text"], font=self.font, tags="hover")
-        bx = self.bbox(t)
-        r = self.create_rectangle(bx[0] - 8, bx[1] - 6, bx[2] + 8, bx[3] + 6, fill=COL["bg"], outline=COL["line"], tags="hover")
-        self.tag_lower(r, t)
+        fm = p.fontMetrics()
+        lh = fm.height()
+        w, h = max(fm.horizontalAdvance(t) for t in lines) + 18, lh * len(lines) + 12
+        left = mx + 14 if mx < (x0 + x1) / 2 else mx - 14 - w
+        p.setPen(QPen(QColor(COL["line"]), 1))
+        p.setBrush(QColor(COL["bg"]))
+        p.drawRoundedRect(QRectF(left, y0 + 4, w, h), 6, 6)
+        p.setPen(QColor(COL["text"]))
+        for j, t in enumerate(lines):
+            p.drawText(QRectF(left + 9, y0 + 10 + j * lh, w - 18, lh), Qt.AlignLeft | Qt.AlignVCenter, t)
 
 
-class BarChart(tk.Canvas):
-    def __init__(self, master, on_pick, height=120):
-        super().__init__(master, height=height, bg=COL["card"], highlightthickness=0, bd=0)
+class BarChart(QWidget):
+    def __init__(self, on_pick, height=120):
+        super().__init__()
+        self.setFixedHeight(height)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
         self.on_pick, self.items, self.selected, self.hot = on_pick, [], None, None
-        self.font = ("Segoe UI", 8)
-        self.bind("<Configure>", lambda e: self.draw())
-        self.bind("<Motion>", self._motion)
-        self.bind("<Leave>", lambda e: self._set_hot(None))
-        self.bind("<Button-1>", self._click)
 
     def plot(self, items, selected):
         self.items, self.selected = items, selected
-        self.draw()
+        self.update()
 
     def _slot(self, x):
-        w = self.winfo_width() - 16
+        w = self.width() - 16
         if not self.items or w <= 0:
             return None
         i = int((x - 8) / (w / len(self.items)))
         return i if 0 <= i < len(self.items) else None
 
-    def draw(self):
-        self.delete("all")
-        w, h = self.winfo_width() - 16, self.winfo_height()
+    def paintEvent(self, e):
+        w, h = self.width() - 16, self.height()
         if not self.items or w <= 0:
             return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(F.chart_small)
         top = max(v or 0 for _, v in self.items) or 1
         slot = w / len(self.items)
-        for i, (label, v) in enumerate(self.items):
+        p.setPen(Qt.NoPen)
+        for i, (_, v) in enumerate(self.items):
             bh = (h - 34) * (v or 0) / top
-            x = 8 + i * slot
             color = COL["accent"] if i == self.selected else (COL["faint"] if i == self.hot else COL["line"])
-            self.create_rectangle(x + slot * 0.15, h - 18 - bh, x + slot * 0.85, h - 18, fill=color, outline="")
-        label, v = self.items[self.hot if self.hot is not None else (self.selected or 0)]
-        self.create_text(8, 10, text=f"{label}  ·  {v:.0f} fps" if v else label, anchor="w", fill=COL["text"], font=self.font)
-        self.create_text(8, h - 8, text=self.items[0][0].split(",")[0], anchor="w", fill=COL["faint"], font=self.font)
-        self.create_text(w + 8, h - 8, text=self.items[-1][0].split(",")[0], anchor="e", fill=COL["faint"], font=self.font)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(8 + i * slot + slot * 0.15, h - 18 - bh, slot * 0.7, bh), 2, 2)
+        text, v = self.items[self.hot if self.hot is not None else (self.selected or 0)]
+        text_at(p, 8, 10, f"{text}  ·  {v:.0f} fps" if v else text, COL["text"], "w")
+        text_at(p, 8, h - 8, self.items[0][0].split(",")[0], COL["faint"], "w")
+        text_at(p, w + 8, h - 8, self.items[-1][0].split(",")[0], COL["faint"], "e")
 
-    def _set_hot(self, i):
+    def set_hot(self, i):
         if i != self.hot:
             self.hot = i
-            self.draw()
+            self.update()
 
-    def _motion(self, event):
-        self._set_hot(self._slot(event.x))
+    def mouseMoveEvent(self, e):
+        self.set_hot(self._slot(e.position().x()))
 
-    def _click(self, event):
-        i = self._slot(event.x)
-        if i is not None:
+    def leaveEvent(self, e):
+        self.set_hot(None)
+
+    def mousePressEvent(self, e):
+        i = self._slot(e.position().x())
+        if i is not None and e.button() == Qt.LeftButton:
             self.on_pick(i)
 
 
-@contextmanager
-def frozen(widget):
-    # Pauses painting of the widget's window while pages are swapped, then paints the result in one pass.
-    hwnd = widget.winfo_id() if sys.platform == "win32" and widget.winfo_viewable() else None
-    if hwnd:
-        _send_message(hwnd, 0x000B, 0, 0)
-    try:
-        yield
-    finally:
-        widget.update_idletasks()
-        if hwnd:
-            _send_message(hwnd, 0x000B, 1, 0)
-            _redraw_window(hwnd, None, None, 0x0001 | 0x0004 | 0x0080 | 0x0100)
-            widget.update_idletasks()
-
-
-class Tabs(ctk.CTkFrame):
-    def __init__(self, master, names, command, font):
-        super().__init__(master, fg_color="transparent")
+class Tabs(QWidget):
+    def __init__(self, names, command):
+        super().__init__()
         self.command, self.current = command, names[0]
-        self.bar = ctk.CTkSegmentedButton(self, values=list(names), command=self.set, font=font, height=34,
-                                          fg_color=COL["bg"], selected_color=COL["accent_deep"],
-                                          selected_hover_color=COL["accent"], unselected_color=COL["bg"],
-                                          unselected_hover_color=COL["card_hi"], text_color=COL["text"])
-        self.bar.pack(anchor="w", pady=(0, 8))
-        body = ctk.CTkFrame(self, fg_color=COL["panel"], corner_radius=12)
-        body.pack(fill="both", expand=True)
-        self.inner = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
-        self.inner.pack(fill="both", expand=True, padx=12, pady=12)
-        self.pages = {n: ctk.CTkFrame(self.inner, fg_color=COL["panel"], corner_radius=0) for n in names}
+        v = vbox(8)
+        self.setLayout(v)
+        self.bar = Segmented(names, "tabs", 34)
+        self.bar.picked.connect(self.set)
+        v.addWidget(self.bar, 0, Qt.AlignLeft)
+        body = Card(COL["panel"], 12)
+        bl = vbox(0, (12, 12, 12, 12))
+        body.setLayout(bl)
+        self.stack = QStackedWidget()
+        bl.addWidget(self.stack)
+        v.addWidget(body, 1)
+        self.pages = {}
+        for n in names:
+            self.pages[n] = QWidget()
+            self.stack.addWidget(self.pages[n])
+        self.bar.set(self.current)
 
     def tab(self, name):
         return self.pages[name]
@@ -1486,139 +2190,188 @@ class Tabs(ctk.CTkFrame):
         return self.current
 
     def set(self, name):
-        old, self.current = self.current, name
+        self.current = name
         self.bar.set(name)
-        with frozen(self.inner):
-            if self.command:
-                self.command()
-            if old != name:
-                self.pages[old].place_forget()
-            self.pages[name].place(x=0, y=0, relwidth=1, relheight=1)
+        if self.command:
+            self.command()
+        self.stack.setCurrentWidget(self.pages[name])
 
 
-class App(ctk.CTk):
+class App(QMainWindow):
     TABS = ("Settings", "Profile", "Transfer", "Backups", "Benchmarks")
+    game_state = Signal(bool)
 
     def __init__(self, root=None):
-        apply_theme()
         super().__init__()
         self.store = Store(APP_DIR)
         cfg = self.store.data["settings"]
+        last_tab = cfg.get("last_tab")
         self.root_dir = Path(root or cfg.get("root") or DEFAULT_ROOT)
-        self.title(f"{APP_NAME} {__version__}")
-        self.geometry(cfg.get("geometry") or "1380x880")
-        self.minsize(1150, 720)
-        F = ctk.CTkFont
-        self.f = SimpleNamespace(
-            h1=F("Segoe UI", 22, "bold"), h2=F("Segoe UI", 15, "bold"), bold=F("Segoe UI", 13, "bold"),
-            body=F("Segoe UI", 13), small=F("Segoe UI", 12), tiny=F("Segoe UI", 10, "bold"),
-            caps=F("Segoe UI", 11, "bold"), mono=F("Consolas", 13), tiny_mono=F("Consolas", 11),
-            tile=F("Segoe UI", 24, "bold"))
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
+        self.setMinimumSize(1150, 720)
+        self.restore_geometry(cfg.get("geometry"))
         self.profiles, self.current, self.ini = [], None, None
         self.orig, self.pending, self.history = {}, {}, []
         self.rows = defaultdict(list)
-        self.layout, self.cat_frames, self.nav_items = {}, {}, {}
+        self.cat_layout, self.cat_frames, self.nav_items = {}, {}, {}
         self.cat, self.search_frame = None, None
         self.hints, self.datacenters, self._auto, self.watchers = {}, [], {}, []
         self.modes = display_modes()
-        self.running, self.file_mtime, self._last_poll = False, None, 0.0
-        self._jobs, self._toast, self._poll_q, self._polling = {}, None, queue.Queue(), False
+        self.running, self.file_mtime, self._last_poll, self._polling = False, None, 0.0, False
+        self._timers, self._toast = {}, None
         self.stale = set()
-        self.x_extra, self.x_sel, self.x_rows, self.x_vars = {}, set(), {}, {}
-        self.benches, self.bench_sel = None, None
-        self.write_buttons = []
+        self.x_extra, self.x_sel, self.x_rows, self.x_vars, self.x_groups = {}, set(), {}, {}, []
+        self.x_summary, self._x_src_last = "", ""
+        self.benches, self.bench_sel, self.b_items = None, None, []
+        self.game_state.connect(self._on_game)
         self.build()
         self.rescan(select=cfg.get("last_profile"))
         self.tabs.command = self.on_tab
-        self.tabs.set(cfg.get("last_tab") if cfg.get("last_tab") in self.TABS else "Settings")
-        self.after(400, self.poll)
-        self.bind_all("<Control-s>", lambda e: self.save())
-        self.bind_all("<Control-z>", lambda e: self.undo())
-        self.bind_all("<Control-f>", lambda e: self.focus_search())
-        self.bind_all("<F5>", lambda e: self.rescan())
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.tabs.set(last_tab if last_tab in self.TABS else "Settings")
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self.poll)
+        self.poll_timer.start(1000)
+        QTimer.singleShot(400, self.poll)
+        self.shortcuts = []
+        for keys, fn in (("Ctrl+S", self.save), ("Ctrl+Z", self.undo), ("Ctrl+F", self.focus_search), ("F5", self.rescan)):
+            sc = QShortcut(QKeySequence(keys), self)
+            sc.activated.connect(lambda fn=fn: fn())
+            self.shortcuts.append(sc)
+
+    def restore_geometry(self, geo):
+        m = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", geo or "")
+        if m:
+            w, h, x, y = map(int, m.groups())
+            self.resize(w, h)
+            if QGuiApplication.screenAt(QPoint(x + 60, y + 30)):
+                self.move(x, y)
+        elif not (geo and self.restoreGeometry(QByteArray.fromBase64(geo.encode()))):
+            self.resize(1380, 880)
 
     def build(self):
-        side = ctk.CTkFrame(self, width=290, fg_color=COL["panel"], corner_radius=0)
-        side.pack(side="left", fill="y")
-        side.pack_propagate(False)
-        head = ctk.CTkFrame(side, fg_color="transparent")
-        head.pack(fill="x", padx=18, pady=(18, 10))
-        ctk.CTkLabel(head, text="R6 Siege", font=self.f.h1, anchor="w").pack(fill="x")
-        ctk.CTkLabel(head, text="Settings Manager", font=self.f.body, text_color=COL["muted"], anchor="w", height=18).pack(fill="x")
-        self.p_filter = ctk.CTkEntry(side, placeholder_text="Filter by label, tag or ID", height=34)
-        self.p_filter.pack(fill="x", padx=14, pady=(6, 8))
-        self.p_filter.bind("<KeyRelease>", lambda e: self.debounce("filter", 150, self.render_sidebar))
-        self.plist = ctk.CTkScrollableFrame(side, fg_color="transparent")
-        self.plist.pack(fill="both", expand=True, padx=6)
-        foot = ctk.CTkFrame(side, fg_color="transparent")
-        foot.pack(fill="x", padx=14, pady=12)
-        self.p_root = ctk.CTkLabel(foot, text="", font=self.f.tiny_mono, text_color=COL["faint"], anchor="w",
-                                   justify="left", wraplength=250)
-        self.p_root.pack(fill="x", pady=(0, 8))
-        row = ctk.CTkFrame(foot, fg_color="transparent")
-        row.pack(fill="x")
-        ctk.CTkButton(row, text="Rescan", width=80, height=30, command=self.rescan).pack(side="left")
-        ctk.CTkButton(row, text="Change folder", width=110, height=30, command=self.change_root).pack(side="left", padx=6)
-        ctk.CTkButton(row, text="Open", width=56, height=30, command=lambda: self.open_path(self.root_dir)).pack(side="left")
+        central = QWidget()
+        central.setFocusPolicy(Qt.ClickFocus)
+        self.setCentralWidget(central)
+        root = hbox(0)
+        central.setLayout(root)
 
-        main = ctk.CTkFrame(self, fg_color="transparent")
-        main.pack(side="left", fill="both", expand=True)
-        header = ctk.CTkFrame(main, fg_color="transparent")
-        header.pack(fill="x", padx=20, pady=(16, 4))
-        self.h_dot = ctk.CTkFrame(header, width=14, height=14, corner_radius=7, fg_color=COL["faint"])
-        self.h_dot.pack(side="left", padx=(0, 10))
-        self.h_title = ctk.CTkLabel(header, text="No profile", font=self.f.h1)
-        self.h_title.pack(side="left")
-        self.h_uuid = ctk.CTkButton(header, text="", font=self.f.tiny_mono, fg_color="transparent", hover_color=COL["card_hi"],
-                                    text_color=COL["faint"], width=10, height=26, command=self.copy_uuid)
-        self.h_uuid.pack(side="left", padx=(12, 0))
-        self.h_lock = ctk.CTkSwitch(header, text="Read-only", font=self.f.small, command=self.toggle_lock,
-                                    switch_width=42, switch_height=22)
-        self.h_lock.pack(side="right")
-        self.h_game = ctk.CTkLabel(header, text="", corner_radius=8, height=28, font=self.f.small)
-        self.h_game.pack(side="right", padx=16)
+        side = Card(COL["panel"], 0)
+        side.setFixedWidth(290)
+        root.addWidget(side)
+        sv = vbox(0)
+        side.setLayout(sv)
+        sv.addWidget(label("R6 Siege", "h1", margins=(18, 18, 18, 0)))
+        sv.addWidget(label("Settings Manager", tone="muted", margins=(18, 0, 18, 10)))
+        self.p_filter = entry("Filter by label, tag or ID")
+        self.p_filter.textEdited.connect(lambda _: self.debounce("filter", 150, self.render_sidebar))
+        line = hbox(0, (14, 6, 14, 8))
+        line.addWidget(self.p_filter)
+        sv.addLayout(line)
+        self.plist, self.plist_lay = scroll_area((10, 0, 8, 4), 8)
+        sv.addWidget(self.plist, 1)
+        foot = vbox(8, (14, 12, 14, 12))
+        self.p_root = label("", "tiny_mono", "faint", wrap=True)
+        foot.addWidget(self.p_root)
+        line = hbox(6)
+        line.addWidget(button("Rescan", self.rescan, width=80))
+        line.addWidget(button("Change folder", self.change_root, width=110))
+        line.addWidget(button("Open", lambda: self.open_path(self.root_dir), width=56))
+        line.addStretch()
+        foot.addLayout(line)
+        sv.addLayout(foot)
 
-        self.tabs = Tabs(main, self.TABS, None, self.f.bold)
-        self.tabs.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        main = vbox(0, (14, 16, 14, 14))
+        root.addLayout(main, 1)
+        header = hbox(0, (6, 0, 6, 0))
+        self.h_dot = Dot(14)
+        header.addWidget(self.h_dot)
+        header.addSpacing(10)
+        self.h_title = label("No profile", "h1")
+        header.addWidget(self.h_title)
+        header.addSpacing(12)
+        self.h_uuid = button("", self.copy_uuid, "uuid", height=26, role="tiny_mono")
+        header.addWidget(self.h_uuid)
+        header.addStretch()
+        self.h_game = Pill("", font=F.small, height=28, radius=8, pad=12)
+        header.addWidget(self.h_game)
+        header.addSpacing(16)
+        self.h_lock = Switch("Read-only", 42, 22)
+        self.h_lock.clicked.connect(self.toggle_lock)
+        header.addWidget(self.h_lock)
+        main.addLayout(header)
+        main.addSpacing(10)
+
+        self.tabs = Tabs(self.TABS, None)
+        main.addWidget(self.tabs, 1)
         self.t = {name: self.tabs.tab(name) for name in self.TABS}
         self.build_settings_tab()
         self.build_transfer_tab()
         self.build_bench_tab()
         self.set_running(False, force=True)
+        central.setFocus()
 
     # helpers
 
     def debounce(self, name, ms, fn):
-        job = self._jobs.pop(name, None)
-        if job:
-            self.after_cancel(job)
-        self._jobs[name] = self.after(ms, fn)
+        if name not in self._timers:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._timers[name][1]())
+            self._timers[name] = [timer, fn]
+        self._timers[name][1] = fn
+        self._timers[name][0].start(ms)
 
     def toast(self, text, kind="ok"):
-        if self._toast is not None and self._toast.winfo_exists():
-            self._toast.destroy()
+        if self._toast is not None:
+            self._toast.hide()
+            self._toast.deleteLater()
         colors = {"ok": (COL["ok_dim"], COL["ok"]), "bad": (COL["bad_dim"], COL["bad"]), "info": (COL["card_hi"], COL["text"])}
-        bg, fg = colors[kind]
-        box = ctk.CTkFrame(self, fg_color=bg, corner_radius=10, border_width=1, border_color=fg)
-        ctk.CTkLabel(box, text=text, text_color=fg, font=self.f.body, wraplength=460, justify="left").pack(padx=16, pady=8)
-        box.place(relx=1, rely=1, x=-24, y=-24, anchor="se")
-        self._toast = box
-        self.after(3200, lambda: box.destroy() if box.winfo_exists() else None)
+        t = self._toast = Toast(self.centralWidget(), text, *colors[kind])
+        self.place_toast()
+        t.show()
+        t.raise_()
+        QTimer.singleShot(3200, lambda: self._drop_toast(t))
+
+    def _drop_toast(self, t):
+        if t is self._toast:
+            t.hide()
+            t.deleteLater()
+            self._toast = None
+
+    def place_toast(self):
+        if self._toast is not None:
+            c, t = self.centralWidget(), self._toast
+            t.move(c.width() - t.width() - 24, c.height() - t.height() - 24)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.place_toast()
 
     def open_path(self, path):
         try:
             os.startfile(path)
         except (OSError, AttributeError) as e:
-            messagebox.showerror(APP_NAME, f"Could not open {path}.\n\n{e}", parent=self)
+            show_msg(self, "error", f"Could not open {path}.\n\n{e}")
 
-    def card(self, master, title=None):
+    def card(self, lay, title=None, radius=12, margins=(16, 14, 16, 14), spacing=6, grid=False):
         if title:
-            ctk.CTkLabel(master, text=title.upper(), font=self.f.caps, text_color=COL["faint"], anchor="w",
-                         height=18).pack(fill="x", padx=10, pady=(16, 6))
-        c = ctk.CTkFrame(master, fg_color=COL["card"], corner_radius=12)
-        c.pack(fill="x", padx=4)
-        return c
+            lay.addWidget(label(title.upper(), "caps", "faint", margins=(10, 16, 10, 6)))
+        c = Card(COL["card"], radius)
+        inner = QGridLayout() if grid else vbox(spacing)
+        inner.setContentsMargins(*margins)
+        c.setLayout(inner)
+        lay.addWidget(c)
+        return c, inner
+
+    def page_content(self, name, widget=None):
+        page = self.t[name]
+        lay = page.layout()
+        if lay is None:
+            lay = vbox(0)
+            page.setLayout(lay)
+        clear_layout(lay)
+        if widget is not None:
+            lay.addWidget(widget)
 
     def spec(self, sec, key):
         s = SPECS.get((sec, key)) or self._auto.get((sec, key))
@@ -1640,7 +2393,7 @@ class App(ctk.CTk):
         return self.pending.get((sec, key), self.orig.get((sec, key)))
 
     def live_rows(self, key):
-        rows = [r for r in self.rows.get(key, []) if r.winfo_exists()]
+        rows = [r for r in self.rows.get(key, []) if r.token.alive]
         self.rows[key] = rows
         return rows
 
@@ -1649,16 +2402,24 @@ class App(ctk.CTk):
 
     def blocked(self):
         if self.running:
-            messagebox.showwarning(APP_NAME, "Close Rainbow Six Siege first.\n\nThe game rewrites its settings file when "
-                                             "it exits, so changes made now would be lost.", parent=self)
+            show_msg(self, "warning", "Close Rainbow Six Siege first.\n\nThe game rewrites its settings file when it exits, "
+                                      "so changes made now would be lost.")
         return self.running
+
+    def commit_focus(self):
+        w = QApplication.focusWidget()
+        if isinstance(w, ValueEdit):
+            w.on_commit()
+
+    def menu_action(self, menu, text, fn):
+        menu.addAction(text).triggered.connect(lambda *_: fn())
 
     # profiles
 
     def rescan(self, select=None):
         keep = select or (self.current.uuid if self.current else None)
         self.profiles = scan_profiles(self.root_dir)
-        self.p_root.configure(text=str(self.root_dir))
+        self.p_root.setText(soft(self.root_dir))
         self.benches = None
         target = self.profile_by_uuid(keep) or (self.profiles[0] if self.profiles else None)
         if target:
@@ -1667,7 +2428,7 @@ class App(ctk.CTk):
             self.current = None
             self.ini = None
             self.orig, self.pending = {}, {}
-            self.layout = {}
+            self.cat_layout = {}
             self.reset_settings_view()
             self.update_header()
             self.render_sidebar()
@@ -1675,8 +2436,8 @@ class App(ctk.CTk):
             self.refresh_bench()
 
     def change_root(self):
-        d = filedialog.askdirectory(initialdir=self.root_dir if self.root_dir.exists() else Path.home(), parent=self,
-                                    title="Choose the Rainbow Six - Siege settings folder")
+        d = QFileDialog.getExistingDirectory(self, "Choose the Rainbow Six - Siege settings folder",
+                                             str(self.root_dir if self.root_dir.exists() else Path.home()))
         if d:
             self.root_dir = Path(d)
             self.store.data["settings"]["root"] = str(self.root_dir)
@@ -1687,7 +2448,7 @@ class App(ctk.CTk):
     def confirm_discard(self):
         if not self.pending:
             return True
-        answer = messagebox.askyesnocancel(APP_NAME, f"Save {len(self.pending)} unsaved changes first?", parent=self)
+        answer = ask_save(self, f"Save {len(self.pending)} unsaved changes first?")
         if answer is None:
             return False
         if answer:
@@ -1704,7 +2465,7 @@ class App(ctk.CTk):
         try:
             ini = IniFile.load(profile.path)
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"Could not read {profile.path}.\n\n{e}", parent=self)
+            show_msg(self, "error", f"Could not read {profile.path}.\n\n{e}")
             return
         self.current, self.ini = profile, ini
         self.orig, self.pending, self.history = ini.values(), {}, []
@@ -1714,125 +2475,122 @@ class App(ctk.CTk):
         self.file_mtime = profile.mtime
         self.store.data["settings"]["last_profile"] = profile.uuid
         self.compute_layout()
-        with frozen(self.tabs.inner):
-            self.reset_settings_view()
-            self.update_header()
-            self.render_sidebar()
-            self.update_dirty()
-            self.stale = {"Profile", "Transfer", "Backups"}
-            self.on_tab()
+        self.reset_settings_view()
+        self.update_header()
+        self.render_sidebar()
+        self.update_dirty()
+        self.stale = {"Profile", "Transfer", "Backups"}
+        self.on_tab()
 
     def reload_current(self):
         if self.current:
             cat = self.cat
             self.load_profile(self.current)
-            if cat in self.layout:
+            if cat in self.cat_layout:
                 self.show_category(cat)
 
     def render_sidebar(self):
-        for w in self.plist.winfo_children():
-            w.destroy()
-        q = self.p_filter.get().strip().lower()
+        clear_layout(self.plist_lay)
+        q = self.p_filter.text().strip().lower()
         shown = 0
         for p in self.profiles:
             m = self.store.meta(p.uuid)
             if q and q not in " ".join([m["label"], p.uuid, m["notes"], *m["tags"]]).lower():
                 continue
-            ProfileCard(self.plist, self, p, bool(self.current and p.uuid == self.current.uuid)).pack(fill="x", pady=4, padx=4)
+            self.plist_lay.addWidget(ProfileCard(self, p, bool(self.current and p.uuid == self.current.uuid)))
             shown += 1
         if not shown:
-            text = "No profile matches the filter." if self.profiles else f"No profile folders found.\n\nPick the folder that holds the UUID folders with Change folder."
-            ctk.CTkLabel(self.plist, text=text, text_color=COL["muted"], font=self.f.small, wraplength=230,
-                         justify="left").pack(fill="x", padx=8, pady=12)
+            text = "No profile matches the filter." if self.profiles else \
+                "No profile folders found.\n\nPick the folder that holds the UUID folders with Change folder."
+            self.plist_lay.addWidget(label(text, "small", "muted", wrap=True, margins=(8, 12, 8, 12)))
+        self.plist_lay.addStretch()
 
     def update_header(self):
         p = self.current
         if not p:
-            self.h_title.configure(text="No profile")
-            self.h_uuid.configure(text="")
-            self.h_dot.configure(fg_color=COL["faint"])
-            self.h_lock.configure(state="disabled")
+            self.h_title.setText("No profile")
+            self.h_uuid.hide()
+            self.h_dot.set_color(COL["faint"])
+            self.h_lock.setEnabled(False)
             return
         meta = self.store.meta(p.uuid)
-        self.h_title.configure(text=self.store.name(p.uuid))
-        self.h_uuid.configure(text=f"{p.uuid}  ⧉")
-        self.h_dot.configure(fg_color=meta["color"])
-        self.h_lock.configure(state="normal")
-        self.h_lock.select() if p.locked else self.h_lock.deselect()
+        self.h_title.setText(self.store.name(p.uuid))
+        self.h_uuid.setText(f"{p.uuid}  ⧉")
+        self.h_uuid.show()
+        self.h_dot.set_color(meta["color"])
+        self.h_lock.setEnabled(True)
+        self.h_lock.setChecked(p.locked)
 
     def copy_uuid(self):
         if self.current:
-            self.clipboard_clear()
-            self.clipboard_append(self.current.uuid)
+            QGuiApplication.clipboard().setText(self.current.uuid)
             self.toast("Profile ID copied.", "info")
 
-    def toggle_lock(self):
+    def toggle_lock(self, *_):
         if not self.current:
             return
-        want = bool(self.h_lock.get())
+        want = self.h_lock.isChecked()
         try:
             set_locked(self.current.path, want)
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"Could not change the file attribute.\n\n{e}", parent=self)
+            show_msg(self, "error", f"Could not change the file attribute.\n\n{e}")
         self.update_header()
         self.render_sidebar()
         self.toast("Locked. The game cannot overwrite this file, and changes made in the game menu will not save."
                    if want else "Unlocked. The game can save settings again.", "info")
 
-    def profile_menu(self, profile, event):
-        menu = self.menu()
-        menu.add_command(label="Open folder", command=lambda: self.open_path(profile.folder))
-        menu.add_command(label="Copy profile ID", command=lambda: (self.clipboard_clear(), self.clipboard_append(profile.uuid)))
+    def profile_menu(self, profile, pos):
+        menu = QMenu(self)
+        self.menu_action(menu, "Open folder", lambda: self.open_path(profile.folder))
+        self.menu_action(menu, "Copy profile ID", lambda: QGuiApplication.clipboard().setText(profile.uuid))
         for site, url in SITES.items():
-            menu.add_command(label=f"Look up on {site}", command=lambda u=url: webbrowser.open(u.format(uuid=profile.uuid)))
-        menu.add_separator()
-        menu.add_command(label="Transfer from this profile", command=lambda: self.start_transfer(("profile", profile.uuid)))
-        menu.tk_popup(event.x_root, event.y_root)
-
-    def menu(self):
-        return tk.Menu(self, tearoff=0, bg=COL["card_hi"], fg=COL["text"], activebackground=COL["accent_deep"],
-                       activeforeground="#ffffff", bd=0, font=("Segoe UI", 10))
+            self.menu_action(menu, f"Look up on {site}", lambda u=url: webbrowser.open(u.format(uuid=profile.uuid)))
+        menu.addSeparator()
+        self.menu_action(menu, "Transfer from this profile", lambda: self.start_transfer(("profile", profile.uuid)))
+        menu.exec(pos)
 
     # settings tab
 
     def build_settings_tab(self):
-        t = self.t["Settings"]
-        t.grid_columnconfigure(1, weight=1)
-        t.grid_rowconfigure(1, weight=1)
-        top = ctk.CTkFrame(t, fg_color="transparent")
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(2, 8))
-        self.s_search = ctk.CTkEntry(top, placeholder_text="Search all settings  (Ctrl+F)", width=340, height=34)
-        self.s_search.pack(side="left")
-        self.s_search.bind("<KeyRelease>", lambda e: self.debounce("search", 220, self.run_search))
-        self.s_search.bind("<Escape>", lambda e: (self.s_search.delete(0, "end"), self.run_search()))
-        ctk.CTkLabel(top, text="Right-click a setting to copy it to other profiles. Ctrl+wheel over a slider fine-tunes it.",
-                     font=self.f.small, text_color=COL["faint"]).pack(side="left", padx=16)
-        self.s_nav = ctk.CTkFrame(t, fg_color="transparent", width=200)
-        self.s_nav.grid(row=1, column=0, sticky="ns", padx=(0, 10))
-        self.s_nav.pack_propagate(False)
-        self.s_holder = ctk.CTkFrame(t, fg_color="transparent")
-        self.s_holder.grid(row=1, column=1, sticky="nsew")
-        bar = ctk.CTkFrame(t, fg_color=COL["card"], corner_radius=10)
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self.s_count = ctk.CTkLabel(bar, text="", font=self.f.body, text_color=COL["muted"])
-        self.s_count.pack(side="left", padx=16, pady=10)
-        self.s_save = ctk.CTkButton(bar, text="Save changes  (Ctrl+S)", width=180, height=34, fg_color=COL["accent"],
-                                    hover_color=COL["accent_hi"], text_color=COL["ink"], font=self.f.bold, command=self.save)
-        self.s_save.pack(side="right", padx=(6, 10), pady=8)
-        self.s_revert = ctk.CTkButton(bar, text="Revert all", width=100, height=34, command=self.revert)
-        self.s_revert.pack(side="right", padx=6)
-        self.s_review = ctk.CTkButton(bar, text="Review", width=90, height=34, command=self.review_changes)
-        self.s_review.pack(side="right", padx=6)
-        self.s_undo = ctk.CTkButton(bar, text="Undo  (Ctrl+Z)", width=120, height=34, fg_color="transparent",
-                                    hover_color=COL["card_hi"], text_color=COL["muted"], command=self.undo)
-        self.s_undo.pack(side="right", padx=6)
-        self.write_buttons.append(self.s_save)
+        v = vbox(0)
+        self.t["Settings"].setLayout(v)
+        top = hbox(16, (0, 2, 0, 8))
+        self.s_search = SearchEdit("Search all settings  (Ctrl+F)", 340, lambda: (self.s_search.clear(), self.run_search()))
+        self.s_search.textEdited.connect(lambda _: self.debounce("search", 220, self.run_search))
+        top.addWidget(self.s_search)
+        hint = label("Right-click a setting to copy it to other profiles. Ctrl+wheel over a slider fine-tunes it.",
+                     "small", "faint")
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(hint, 1)
+        v.addLayout(top)
+        mid = hbox(10)
+        nav = QWidget()
+        nav.setFixedWidth(200)
+        self.nav_lay = vbox(2)
+        nav.setLayout(self.nav_lay)
+        mid.addWidget(nav)
+        self.s_holder = QStackedWidget()
+        mid.addWidget(self.s_holder, 1)
+        v.addLayout(mid, 1)
+        v.addSpacing(10)
+        bar = Card(COL["card"], 10)
+        bl = hbox(12, (16, 8, 10, 8))
+        bar.setLayout(bl)
+        self.s_count = label("", tone="muted")
+        bl.addWidget(self.s_count)
+        bl.addStretch()
+        self.s_undo = button("Undo  (Ctrl+Z)", self.undo, "flat", 120, 34)
+        self.s_review = button("Review", self.review_changes, width=90, height=34)
+        self.s_revert = button("Revert all", self.revert, width=100, height=34)
+        self.s_save = button("Save changes  (Ctrl+S)", self.save, "primary", 180, 34)
+        for b in (self.s_undo, self.s_review, self.s_revert, self.s_save):
+            bl.addWidget(b)
+        v.addWidget(bar)
 
     def focus_search(self):
         self.tabs.set("Settings")
-        self.on_tab()
-        self.s_search.focus_set()
-        self.s_search.select_range(0, "end")
+        self.s_search.setFocus()
+        self.s_search.selectAll()
 
     def compute_layout(self):
         layout = defaultdict(lambda: defaultdict(list))
@@ -1848,163 +2606,175 @@ class App(ctk.CTk):
         def rank(s):
             return RANK.get((s.sec, s.key), 100000 + pos.get((s.sec, s.key), 0))
 
-        self.layout = {}
+        self.cat_layout = {}
         for cat in CATEGORIES:
             if cat in layout:
                 groups = sorted(layout[cat].items(), key=lambda g: GROUP_RANK.get((cat, g[0]), 1000 + min(map(rank, g[1]))))
-                self.layout[cat] = {g: sorted(specs, key=rank) for g, specs in groups}
+                self.cat_layout[cat] = {g: sorted(specs, key=rank) for g, specs in groups}
 
     def reset_settings_view(self):
-        for f in self.cat_frames.values():
-            f.destroy()
-        self.cat_frames = {}
-        if self.search_frame:
-            self.search_frame.destroy()
-            self.search_frame = None
+        for f in [*self.cat_frames.values(), self.search_frame]:
+            if f is not None:
+                f.token.alive = False
+        self.cat_frames, self.search_frame = {}, None
+        while self.s_holder.count():
+            w = self.s_holder.widget(0)
+            self.s_holder.removeWidget(w)
+            discard(w)
         self.rows = defaultdict(list)
         self.watchers = []
-        for w in self.s_nav.winfo_children():
-            w.destroy()
-        for w in self.s_holder.winfo_children():
-            w.destroy()
+        clear_layout(self.nav_lay)
         self.nav_items = {}
-        if not self.layout:
-            ctk.CTkLabel(self.s_holder, text="No settings loaded.", text_color=COL["muted"], font=self.f.body).pack(pady=40)
+        if not self.cat_layout:
+            msg = label("No settings loaded.", tone="muted", margins=(0, 40, 0, 0))
+            msg.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            self.s_holder.addWidget(msg)
             return
-        for cat in self.layout:
-            item = NavItem(self.s_nav, self, cat, lambda c=cat: self.show_category(c))
-            item.pack(fill="x", pady=1)
+        for cat in self.cat_layout:
+            item = NavItem(cat, lambda c=cat: self.show_category(c))
+            self.nav_lay.addWidget(item)
             self.nav_items[cat] = item
         if self.current:
             mod = datetime.fromtimestamp(self.current.mtime) if self.current.mtime else None
-            ctk.CTkLabel(self.s_nav, text=f"{len(self.orig)} keys\nsaved {nice_date(mod)}" if mod else "",
-                         font=self.f.small, text_color=COL["faint"], justify="left", anchor="w").pack(fill="x", padx=12, pady=16)
-        self.show_category(self.cat if self.cat in self.layout else next(iter(self.layout)))
+            self.nav_lay.addWidget(label(f"{len(self.orig)} keys\nsaved {nice_date(mod)}" if mod else "", "small", "faint",
+                                         margins=(12, 16, 12, 0)))
+        self.nav_lay.addStretch()
+        self.show_category(self.cat if self.cat in self.cat_layout else next(iter(self.cat_layout)))
 
-    def build_rows(self, frame, items, search=False):
+    def settings_page(self):
+        area, lay = scroll_area((2, 0, 10, 12))
+        area.token = SimpleNamespace(alive=True)
+        return area, lay
+
+    def kill_page(self, area):
+        area.token.alive = False
+        self.s_holder.removeWidget(area)
+        discard(area)
+
+    def build_rows(self, lay, items, token, search=False):
         for title, specs in items:
-            ctk.CTkLabel(frame, text=title.upper(), font=self.f.caps, text_color=COL["faint"], anchor="w",
-                         height=18).pack(fill="x", padx=10, pady=(16, 2))
-            cat, group = (specs[0].cat, specs[0].group)
+            lay.addWidget(label(title.upper(), "caps", "faint", margins=(8, 16, 8, 2)))
+            cat, group = specs[0].cat, specs[0].group
             note = GROUP_NOTES.get((cat, group))
             if note:
-                ctk.CTkLabel(frame, text=note, font=self.f.small, text_color=COL["faint"], anchor="w", justify="left",
-                             wraplength=720, height=16).pack(fill="x", padx=10, pady=(0, 2))
-            card = ctk.CTkFrame(frame, fg_color=COL["card"], corner_radius=12)
-            card.pack(fill="x", padx=(2, 10), pady=(4, 0))
+                lay.addWidget(label(note, "small", "faint", wrap=True, margins=(8, 0, 8, 2)))
+            lay.addSpacing(4)
+            _, cl = self.card(lay, margins=(6, 6, 6, 6), spacing=2)
             if not search:
                 if (cat, group) == ("Mouse", "Hipfire"):
-                    self.sens_panel(card)
+                    self.sens_panel(cl, token)
                 elif (cat, group) == ("Mouse", "Aim down sights"):
-                    self.scope_panel(card, "ADSMouseSensitivity")
+                    self.scope_panel(cl, "ADSMouseSensitivity")
                 elif (cat, group) == ("Controller", "Aim down sights"):
-                    self.scope_panel(card, "ADSGamepadSensitivity")
+                    self.scope_panel(cl, "ADSGamepadSensitivity")
             for spec in specs:
-                SettingRow(card, self, spec).pack(fill="x", padx=6, pady=2)
-            ctk.CTkFrame(card, height=4, fg_color="transparent").pack()
+                cl.addWidget(SettingRow(self, spec, token))
+        lay.addStretch()
 
     def build_category(self, cat):
-        frame = ctk.CTkScrollableFrame(self.s_holder, fg_color="transparent")
-        self.build_rows(frame, self.layout[cat].items())
-        return frame
+        area, lay = self.settings_page()
+        self.build_rows(lay, self.cat_layout[cat].items(), area.token)
+        self.s_holder.addWidget(area)
+        return area
 
     def show_category(self, cat):
-        with frozen(self.s_holder):
-            if self.search_frame:
-                self.search_frame.destroy()
-                self.search_frame = None
-                self.s_search.delete(0, "end")
-            self.cat = cat
-            for c, item in self.nav_items.items():
-                item.set_active(c == cat)
-            for f in self.cat_frames.values():
-                f.pack_forget()
-            if cat not in self.cat_frames:
-                self.cat_frames[cat] = self.build_category(cat)
-            self.cat_frames[cat].pack(fill="both", expand=True)
+        if self.search_frame:
+            self.kill_page(self.search_frame)
+            self.search_frame = None
+            self.s_search.clear()
+        self.cat = cat
+        for c, item in self.nav_items.items():
+            item.set_active(c == cat)
+        if cat not in self.cat_frames:
+            self.cat_frames[cat] = self.build_category(cat)
+        self.s_holder.setCurrentWidget(self.cat_frames[cat])
 
     def run_search(self):
-        q = self.s_search.get().strip().lower()
+        q = self.s_search.text().strip().lower()
         if not q:
             if self.search_frame:
-                self.search_frame.destroy()
+                self.kill_page(self.search_frame)
                 self.search_frame = None
-            if self.cat in self.layout:
+            if self.cat in self.cat_layout:
                 self.show_category(self.cat)
             return
-        with frozen(self.s_holder):
-            if self.search_frame:
-                self.search_frame.destroy()
-            for item in self.nav_items.values():
-                item.set_active(False)
-            for f in self.cat_frames.values():
-                f.pack_forget()
-            groups = []
-            for cat, cat_groups in self.layout.items():
-                for group, specs in cat_groups.items():
-                    hits = [s for s in specs if q in f"{s.label} {s.key} {s.help} {group} {cat}".lower()]
-                    if hits:
-                        groups.append((f"{cat}  ·  {group}", hits))
-            frame = ctk.CTkScrollableFrame(self.s_holder, fg_color="transparent")
-            if groups:
-                self.build_rows(frame, groups, search=True)
-            else:
-                ctk.CTkLabel(frame, text=f'No setting matches "{q}".', text_color=COL["muted"], font=self.f.body).pack(pady=40)
-            frame.pack(fill="both", expand=True)
-            self.search_frame = frame
+        if self.search_frame:
+            self.kill_page(self.search_frame)
+        for item in self.nav_items.values():
+            item.set_active(False)
+        groups = []
+        for cat, cat_groups in self.cat_layout.items():
+            for group, specs in cat_groups.items():
+                hits = [s for s in specs if q in f"{s.label} {s.key} {s.help} {group} {cat}".lower()]
+                if hits:
+                    groups.append((f"{cat}  ·  {group}", hits))
+        area, lay = self.settings_page()
+        if groups:
+            self.build_rows(lay, groups, area.token, search=True)
+        else:
+            msg = label(f'No setting matches "{q}".', tone="muted", margins=(0, 40, 0, 0))
+            msg.setAlignment(Qt.AlignHCenter)
+            lay.addWidget(msg)
+            lay.addStretch()
+        self.s_holder.addWidget(area)
+        self.s_holder.setCurrentWidget(area)
+        self.search_frame = area
 
-    def tool_box(self, card, title):
-        box = ctk.CTkFrame(card, fg_color=COL["bg"], corner_radius=10)
-        box.pack(fill="x", padx=8, pady=(8, 4))
-        ctk.CTkLabel(box, text=title.upper(), font=self.f.caps, text_color=COL["accent"], anchor="w",
-                     height=18).pack(fill="x", padx=14, pady=(10, 2))
-        return box
+    def tool_box(self, cl, title):
+        box = Card(COL["bg"], 10)
+        bl = vbox(6, (14, 10, 14, 12))
+        box.setLayout(bl)
+        bl.addWidget(label(title.upper(), "caps", "accent"))
+        cl.addWidget(box)
+        cl.addSpacing(4)
+        return bl
 
-    def tool_entry(self, master, text, width=70, value=""):
-        ctk.CTkLabel(master, text=text, font=self.f.small, text_color=COL["muted"]).pack(side="left", padx=(0, 6))
-        e = ctk.CTkEntry(master, width=width, height=30, justify="center", font=self.f.mono)
-        e.insert(0, value)
-        e.pack(side="left", padx=(0, 6))
+    def tool_entry(self, line, text, width=70, value=""):
+        line.addWidget(label(text, "small", "muted"))
+        e = entry(width=width, height=30, role="mono", center=True, text=value)
+        line.addWidget(e)
         return e
 
     def watch(self, fn):
         self.watchers.append(fn)
         fn()
 
-    def sens_panel(self, card):
+    def sens_panel(self, cl, token):
         yk, pk, mk = ("INPUT", "MouseYawSensitivity"), ("INPUT", "MousePitchSensitivity"), ("INPUT", "MouseSensitivityMultiplierUnit")
         if not all(k in self.orig for k in (yk, pk, mk)):
             return
         meta = self.store.meta(self.current.uuid)
-        box = self.tool_box(card, "Sensitivity calculator")
-        read = ctk.CTkLabel(box, text="", font=self.f.mono, text_color=COL["text"], justify="left", anchor="w", height=38)
-        read.pack(fill="x", padx=14, pady=(2, 6))
-        line = ctk.CTkFrame(box, fg_color="transparent")
-        line.pack(fill="x", padx=14, pady=(0, 6))
-        dpi = self.tool_entry(line, "Mouse DPI", 70, str(meta.get("dpi", 800)))
-        ctk.CTkFrame(line, width=18, height=1, fg_color="transparent").pack(side="left")
+        bl = self.tool_box(cl, "Sensitivity calculator")
+        read = label("", "mono")
+        bl.addWidget(read)
+        line = hbox(6)
+        dpi = self.tool_entry(line, "Mouse DPI", 70, f"{meta.get('dpi', 800):g}")
+        line.addSpacing(18)
         cm = self.tool_entry(line, "Target cm/360", 70)
-        ctk.CTkButton(line, text="Match", width=70, height=30, command=lambda: match_cm()).pack(side="left")
-        line2 = ctk.CTkFrame(box, fg_color="transparent")
-        line2.pack(fill="x", padx=14, pady=(0, 6))
+        line.addWidget(button("Match", lambda: match_cm(), width=70))
+        line.addStretch()
+        bl.addLayout(line)
+        line2 = hbox(6)
         slot = self.tool_entry(line2, "Finer steps: move the horizontal slider to", 60, "50")
-        ctk.CTkButton(line2, text="Keep my feel", width=110, height=30, command=lambda: finer()).pack(side="left")
-        ctk.CTkLabel(box, text="The multiplier is changed so the effective sensitivity stays the same. cm/360 uses "
-                               f"{DEG_PER_COUNT:.6f}° per count at slider 1 and multiplier 0.02, a community-measured value.",
-                     font=self.f.small, text_color=COL["faint"], wraplength=720, justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+        line2.addWidget(button("Keep my feel", lambda: finer(), width=110))
+        line2.addStretch()
+        bl.addLayout(line2)
+        bl.addWidget(label("The multiplier is changed so the effective sensitivity stays the same. cm/360 uses "
+                           f"{DEG_PER_COUNT:.6f}° per count at slider 1 and multiplier 0.02, a community-measured value.",
+                           "small", "faint", wrap=True))
 
         def vals():
             return [num(self.value(*k)) or 0 for k in (yk, pk, mk)]
 
         def dpi_value():
-            d = num(dpi.get())
+            d = num(dpi.text())
             if d and d != meta.get("dpi"):
                 meta["dpi"] = d
                 self.store.save()
             return d or 0
 
         def refresh():
-            if not read.winfo_exists():
+            if not token.alive:
                 return False
             yaw, pitch, mult = vals()
             deg = DEG_PER_COUNT * yaw * mult / 0.02
@@ -2012,11 +2782,11 @@ class App(ctk.CTk):
             text = f"Effective   {yaw * mult:.6f} horizontal   {pitch * mult:.6f} vertical"
             if deg and d:
                 text += f"\ncm/360      {2.54 * 360 / (deg * d):.2f} cm at {d:g} DPI   ·   {deg:.6f}° per count"
-            read.configure(text=text)
+            read.setText(text)
             return True
 
         def finer():
-            target = num(slot.get())
+            target = num(slot.text())
             yaw, pitch, mult = vals()
             if not target or not 1 <= target <= 100 or not yaw or not mult:
                 self.toast("Enter a slider value from 1 to 100.", "bad")
@@ -2032,7 +2802,7 @@ class App(ctk.CTk):
                        + (f", vertical moved by {drift:.6f}." if drift > 1e-9 else ", vertical too."), "info")
 
         def match_cm():
-            target, d = num(cm.get()), dpi_value()
+            target, d = num(cm.text()), dpi_value()
             yaw, _pitch, _mult = vals()
             if not target or not d or not yaw:
                 self.toast("Enter your DPI and a target cm/360.", "bad")
@@ -2041,16 +2811,15 @@ class App(ctk.CTk):
             self.set_value(*mk, f"{deg / DEG_PER_COUNT / yaw * 0.02:.6f}")
             self.toast(f"Multiplier set for {target:g} cm/360 at {d:g} DPI.", "info")
 
-        dpi.bind("<KeyRelease>", lambda e: refresh())
+        dpi.textEdited.connect(lambda _: refresh())
         self.watch(refresh)
 
-    def scope_panel(self, card, prefix):
+    def scope_panel(self, cl, prefix):
         keys = [("INPUT", f"{prefix}{s}") for s in SCOPES if ("INPUT", f"{prefix}{s}") in self.orig]
         if not keys:
             return
-        box = self.tool_box(card, "All scopes at once")
-        line = ctk.CTkFrame(box, fg_color="transparent")
-        line.pack(fill="x", padx=14, pady=(2, 10))
+        bl = self.tool_box(cl, "All scopes at once")
+        line = hbox(8)
         value = self.tool_entry(line, "Value", 60, "50")
 
         def set_all(v):
@@ -2060,10 +2829,11 @@ class App(ctk.CTk):
             for k in keys:
                 self.set_value(*k, str(int(round(min(100, max(1, v))))))
 
-        ctk.CTkButton(line, text="Set every scope", width=130, height=30, command=lambda: set_all(value.get())).pack(side="left")
-        ctk.CTkButton(line, text="Copy 1x to all", width=120, height=30,
-                      command=lambda: set_all(self.value("INPUT", f"{prefix}1x"))).pack(side="left", padx=8)
-        ctk.CTkButton(line, text="Match hipfire (50)", width=140, height=30, command=lambda: set_all(50)).pack(side="left")
+        line.addWidget(button("Set every scope", lambda: set_all(value.text()), width=130))
+        line.addWidget(button("Copy 1x to all", lambda: set_all(self.value("INPUT", f"{prefix}1x")), width=120))
+        line.addWidget(button("Match hipfire (50)", lambda: set_all(50), width=140))
+        line.addStretch()
+        bl.addLayout(line)
 
     def set_value(self, sec, key, value, src=None, record=True):
         k = (sec, key)
@@ -2115,18 +2885,19 @@ class App(ctk.CTk):
 
     def update_dirty(self):
         n = len(self.pending)
-        self.s_count.configure(text=f"{n} unsaved change{'s' if n != 1 else ''}" if n else "No unsaved changes",
-                               text_color=COL["accent"] if n else COL["muted"])
-        for b in (self.s_revert, self.s_review):
-            b.configure(state="normal" if n else "disabled")
-        self.s_undo.configure(state="normal" if self.history else "disabled")
-        set_primary(self.s_save, bool(n) and not self.running)
+        self.s_count.setText(f"{n} unsaved change{'s' if n != 1 else ''}" if n else "No unsaved changes")
+        restyle(self.s_count, tone="accent" if n else "muted")
+        self.s_revert.setEnabled(bool(n))
+        self.s_review.setEnabled(bool(n))
+        self.s_undo.setEnabled(bool(self.history))
+        self.s_save.setEnabled(bool(n) and not self.running)
         counts = Counter(self.spec(*k).cat for k in self.pending if self.spec(*k).kind != "hidden")
         for cat, item in self.nav_items.items():
             item.set_count(counts.get(cat, 0))
-        self.title(f"{APP_NAME} {__version__}{'  (unsaved changes)' if n else ''}")
+        self.setWindowTitle(f"{APP_NAME} {__version__}{'  (unsaved changes)' if n else ''}")
 
     def save(self):
+        self.commit_focus()
         if not self.pending or not self.current:
             return True
         if self.blocked():
@@ -2137,7 +2908,7 @@ class App(ctk.CTk):
                 ini.set(sec, key, v)
             write_profile(self.store, self.current, ini, "before edit")
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"Saving failed. The file was not changed.\n\n{e}", parent=self)
+            show_msg(self, "error", f"Saving failed. The file was not changed.\n\n{e}")
             return False
         n = len(self.pending)
         self.ini, self.orig = ini, ini.values()
@@ -2146,7 +2917,7 @@ class App(ctk.CTk):
         self.file_mtime = self.current.mtime
         for rows in self.rows.values():
             for r in rows:
-                if r.winfo_exists():
+                if r.token.alive:
                     r.mark()
         self.update_dirty()
         self.render_sidebar()
@@ -2157,53 +2928,52 @@ class App(ctk.CTk):
     def review_changes(self):
         if not self.pending:
             return
-        top = ctk.CTkToplevel(self)
-        top.title("Unsaved changes")
-        top.geometry("720x480")
-        top.transient(self)
-        top.after(80, top.lift)
-        frame = ctk.CTkScrollableFrame(top, fg_color="transparent")
-        frame.pack(fill="both", expand=True, padx=12, pady=12)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Unsaved changes")
+        dlg.resize(720, 480)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        v = vbox(10, (12, 12, 12, 12))
+        dlg.setLayout(v)
+        area, lay = scroll_area((0, 0, 8, 0), 6)
+        v.addWidget(area, 1)
 
         def fill():
-            for w in frame.winfo_children():
-                w.destroy()
+            clear_layout(lay)
             for k in sorted(self.pending, key=lambda k: RANK.get(k, 1e9)):
                 spec = self.spec(*k)
-                row = ctk.CTkFrame(frame, fg_color=COL["card"], corner_radius=8)
-                row.pack(fill="x", pady=3)
-                ctk.CTkLabel(row, text=spec.label if spec.kind != "resolution" else "Resolution width", font=self.f.body,
-                             width=220, anchor="w").pack(side="left", padx=12, pady=8)
-                ctk.CTkLabel(row, text=f"{spec.show(self.orig.get(k))}   →   {spec.show(self.pending[k])}",
-                             font=self.f.mono, text_color=COL["accent"], anchor="w").pack(side="left", fill="x", expand=True)
-                ctk.CTkButton(row, text="Undo", width=70, height=28,
-                              command=lambda k=k: (self.set_value(*k, self.orig.get(k)), fill())).pack(side="right", padx=8)
+                row = Card(COL["card"], 8)
+                rl = hbox(8, (12, 6, 8, 6))
+                row.setLayout(rl)
+                rl.addWidget(label(spec.label if spec.kind != "resolution" else "Resolution width", width=220))
+                rl.addWidget(label(f"{spec.show(self.orig.get(k))}   →   {spec.show(self.pending[k])}", "mono", "accent"), 1)
+                rl.addWidget(button("Undo", lambda k=k: (self.set_value(*k, self.orig.get(k)), fill()), width=70))
+                lay.addWidget(row)
+            lay.addStretch()
             if not self.pending:
-                top.destroy()
+                dlg.close()
 
         fill()
-        bar = ctk.CTkFrame(top, fg_color="transparent")
-        bar.pack(fill="x", padx=12, pady=(0, 12))
-        ctk.CTkButton(bar, text="Save changes", fg_color=COL["accent"], hover_color=COL["accent_hi"], text_color=COL["ink"],
-                      command=lambda: (self.save() and top.destroy())).pack(side="right")
-        ctk.CTkButton(bar, text="Close", command=top.destroy).pack(side="right", padx=8)
+        bar = hbox(8)
+        bar.addStretch()
+        bar.addWidget(button("Close", dlg.close))
+        bar.addWidget(button("Save changes", lambda: self.save() and dlg.close(), "primary"))
+        v.addLayout(bar)
+        dlg.show()
 
-    def row_menu(self, row, event):
-        menu = self.menu()
+    def row_menu(self, row, pos):
+        menu = QMenu(self)
         spec = row.spec
         if any(k in self.pending for k in row.keys):
-            menu.add_command(label="Reset to saved value", command=lambda: self.reset_keys(row.keys))
-        menu.add_command(label=f"Copy key name  ({spec.path})",
-                         command=lambda: (self.clipboard_clear(), self.clipboard_append(spec.path)))
+            self.menu_action(menu, "Reset to saved value", lambda: self.reset_keys(row.keys))
+        self.menu_action(menu, f"Copy key name  ({spec.path})", lambda: QGuiApplication.clipboard().setText(spec.path))
         others = [p for p in self.profiles if p.uuid != self.current.uuid]
         if others:
-            menu.add_separator()
-            sub = self.menu()
+            menu.addSeparator()
+            sub = menu.addMenu("Apply this value to")
             for p in others:
-                sub.add_command(label=self.store.name(p.uuid), command=lambda p=p: self.push_keys(row.keys, [p]))
-            menu.add_cascade(label="Apply this value to", menu=sub)
-            menu.add_command(label="Apply this value to all other profiles", command=lambda: self.push_keys(row.keys, others))
-        menu.tk_popup(event.x_root, event.y_root)
+                self.menu_action(sub, self.store.name(p.uuid), lambda p=p: self.push_keys(row.keys, [p]))
+            self.menu_action(menu, "Apply this value to all other profiles", lambda: self.push_keys(row.keys, others))
+        menu.exec(pos)
 
     def push_keys(self, keys, targets):
         if self.blocked():
@@ -2218,7 +2988,7 @@ class App(ctk.CTk):
                 write_profile(self.store, p, ini, f"before copy of {keys[0][1]}")
                 done.append(self.store.name(p.uuid))
             except OSError as e:
-                messagebox.showerror(APP_NAME, f"Could not update {self.store.name(p.uuid)}.\n\n{e}", parent=self)
+                show_msg(self, "error", f"Could not update {self.store.name(p.uuid)}.\n\n{e}")
         if done:
             self.stale |= {"Transfer"}
             self.render_sidebar()
@@ -2227,56 +2997,53 @@ class App(ctk.CTk):
     # profile tab
 
     def build_profile_tab(self):
-        t = self.t["Profile"]
-        for w in t.winfo_children():
-            w.destroy()
         p = self.current
         if not p:
+            self.page_content("Profile")
             return
         meta = self.store.meta(p.uuid)
-        wrap = ctk.CTkScrollableFrame(t, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
+        area, wrap = scroll_area((0, 0, 10, 12))
 
         def commit():
             self.store.save()
             self.update_header()
             self.render_sidebar()
 
-        ident = self.card(wrap, "Identity")
-        ident.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(ident, text="Label", font=self.f.body, text_color=COL["muted"]).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
-        name = ctk.CTkEntry(ident, height=36, font=self.f.h2, placeholder_text="For example Main account")
-        name.grid(row=0, column=1, sticky="ew", padx=(0, 16), pady=(14, 6))
-        if meta["label"]:
-            name.insert(0, meta["label"])
+        _, g = self.card(wrap, "Identity", grid=True, margins=(16, 14, 16, 16))
+        g.setColumnStretch(1, 1)
+        g.setHorizontalSpacing(16)
+        g.setVerticalSpacing(12)
+        g.addWidget(label("Label", tone="muted"), 0, 0)
+        name = entry("For example Main account", height=36, role="h2", text=meta["label"])
 
-        def set_name(_e=None):
-            if name.get().strip() != meta["label"]:
-                meta["label"] = name.get().strip()
+        def set_name():
+            if name.text().strip() != meta["label"]:
+                meta["label"] = name.text().strip()
                 commit()
 
-        name.bind("<Return>", set_name)
-        name.bind("<FocusOut>", set_name)
+        name.editingFinished.connect(set_name)
+        g.addWidget(name, 0, 1)
 
-        ctk.CTkLabel(ident, text="Color", font=self.f.body, text_color=COL["muted"]).grid(row=1, column=0, sticky="w", padx=16, pady=6)
-        swatches = ctk.CTkFrame(ident, fg_color="transparent")
-        swatches.grid(row=1, column=1, sticky="w", pady=6)
+        g.addWidget(label("Color", tone="muted"), 1, 0)
+        swatches = hbox(8)
         for c in PROFILE_COLORS:
-            ctk.CTkButton(swatches, text="", width=28, height=28, corner_radius=14, fg_color=c, hover_color=c,
-                          border_width=3 if c == meta["color"] else 0, border_color=COL["text"],
-                          command=lambda c=c: (meta.update(color=c), commit(), self.build_profile_tab())).pack(side="left", padx=(0, 8))
+            s = Swatch(c, c == meta["color"])
+            s.clicked.connect(lambda *_, c=c: (meta.update(color=c), commit(), self.build_profile_tab()))
+            swatches.addWidget(s)
+        swatches.addStretch()
+        g.addLayout(swatches, 1, 1)
 
-        ctk.CTkLabel(ident, text="Tags", font=self.f.body, text_color=COL["muted"]).grid(row=2, column=0, sticky="nw", padx=16, pady=10)
-        tagbox = ctk.CTkFrame(ident, fg_color="transparent")
-        tagbox.grid(row=2, column=1, sticky="ew", padx=(0, 16), pady=6)
-        chips = ctk.CTkFrame(tagbox, fg_color="transparent", height=1)
-        chips.pack(fill="x")
-        for tag in meta["tags"]:
-            ctk.CTkButton(chips, text=f"{tag}   ×", height=28, width=10, corner_radius=14, fg_color=COL["line"],
-                          hover_color=COL["bad_dim"], font=self.f.small,
-                          command=lambda tag=tag: (meta["tags"].remove(tag), commit(), self.build_profile_tab())).pack(side="left", padx=(0, 6), pady=2)
-        entry = ctk.CTkEntry(tagbox, height=32, width=260, placeholder_text="Add a tag and press Enter")
-        entry.pack(anchor="w", pady=(6, 4))
+        g.addWidget(label("Tags", tone="muted", margins=(0, 6, 0, 0)), 2, 0, Qt.AlignTop)
+        tagbox = vbox(8)
+        if meta["tags"]:
+            chips = QWidget()
+            flow = FlowLayout(chips, 6)
+            for tag in meta["tags"]:
+                flow.addWidget(button(f"{tag}   ×", lambda tag=tag: (meta["tags"].remove(tag), commit(), self.build_profile_tab()),
+                                      "chip", height=28))
+            tagbox.addWidget(chips)
+        add = entry("Add a tag and press Enter", 260, 32)
+        tagbox.addWidget(add)
 
         def add_tag(tag):
             tag = tag.strip()
@@ -2284,66 +3051,73 @@ class App(ctk.CTk):
                 meta["tags"].append(tag)
                 commit()
                 self.build_profile_tab()
+                self.p_tag_entry.setFocus()
 
-        entry.bind("<Return>", lambda e: add_tag(entry.get()))
-        suggestions = [tg for tg in self.store.all_tags() + ["main", "smurf", "stretched", "stream"]
-                       if tg not in meta["tags"]]
+        add.returnPressed.connect(lambda: add_tag(add.text()))
+        self.p_tag_entry = add
+        suggestions = [tg for tg in self.store.all_tags() + ["main", "smurf", "stretched", "stream"] if tg not in meta["tags"]]
         if suggestions:
-            sug = ctk.CTkFrame(tagbox, fg_color="transparent")
-            sug.pack(fill="x")
-            ctk.CTkLabel(sug, text="Quick add", font=self.f.small, text_color=COL["faint"]).pack(side="left", padx=(0, 8))
+            sug = QWidget()
+            flow = FlowLayout(sug, 4)
+            flow.addWidget(label("Quick add", "small", "faint", margins=(0, 3, 4, 0)))
             for tg in list(dict.fromkeys(suggestions))[:9]:
-                ctk.CTkButton(sug, text=f"+ {tg}", height=24, width=10, corner_radius=12, fg_color="transparent",
-                              border_width=1, border_color=COL["line"], hover_color=COL["card_hi"], text_color=COL["muted"],
-                              font=self.f.small, command=lambda tg=tg: add_tag(tg)).pack(side="left", padx=(0, 4))
+                flow.addWidget(button(f"+ {tg}", lambda tg=tg: add_tag(tg), "quick", height=24))
+            tagbox.addWidget(sug)
+        g.addLayout(tagbox, 2, 1)
 
-        ctk.CTkLabel(ident, text="Notes", font=self.f.body, text_color=COL["muted"]).grid(row=3, column=0, sticky="nw", padx=16, pady=10)
-        notes = ctk.CTkTextbox(ident, height=90, font=self.f.body, wrap="word")
-        notes.grid(row=3, column=1, sticky="ew", padx=(0, 16), pady=(6, 16))
-        notes.insert("1.0", meta["notes"])
+        g.addWidget(label("Notes", tone="muted", margins=(0, 6, 0, 0)), 3, 0, Qt.AlignTop)
+        notes = QPlainTextEdit(meta["notes"])
+        notes.setFixedHeight(90)
 
-        def set_notes(_e=None):
-            text = notes.get("1.0", "end-1c")
+        def set_notes():
+            text = notes.toPlainText()
             if text != meta["notes"]:
                 meta["notes"] = text
-                self.store.save()
+                self.debounce("notes", 600, self.store.save)
 
-        notes.bind("<FocusOut>", set_notes)
+        notes.textChanged.connect(set_notes)
+        g.addWidget(notes, 3, 1)
 
-        who = self.card(wrap, "Whose account is this?")
-        ctk.CTkLabel(who, text="The folder name is a Ubisoft profile ID. Open it on a stats site to see the account name, "
-                               "then use that name as the label. This opens your browser; the app sends nothing itself.",
-                     font=self.f.small, text_color=COL["muted"], wraplength=760, justify="left", anchor="w").pack(fill="x", padx=16, pady=(14, 8))
-        row = ctk.CTkFrame(who, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 14))
-        site = ctk.CTkSegmentedButton(row, values=list(SITES), font=self.f.body, height=32)
+        _, who = self.card(wrap, "Whose account is this?", spacing=10)
+        who.addWidget(label("The folder name is a Ubisoft profile ID. Open it on a stats site to see the account name, "
+                            "then use that name as the label. This opens your browser; the app sends nothing itself.",
+                            "small", "muted", wrap=True))
+        line = hbox(10)
+        site = Segmented(list(SITES), "choice", 32)
         site.set(self.store.data["settings"].get("site", next(iter(SITES))))
-        site.pack(side="left")
+        line.addWidget(site)
 
         def lookup():
-            self.store.data["settings"]["site"] = site.get()
-            webbrowser.open(SITES[site.get()].format(uuid=p.uuid))
+            name_ = site.get() or next(iter(SITES))
+            self.store.data["settings"]["site"] = name_
+            webbrowser.open(SITES[name_].format(uuid=p.uuid))
 
-        ctk.CTkButton(row, text="Open in browser", height=32, fg_color=COL["accent"], hover_color=COL["accent_hi"],
-                      text_color=COL["ink"], font=self.f.bold, command=lookup).pack(side="left", padx=10)
+        line.addWidget(button("Open in browser", lookup, "primary", height=32))
+        line.addStretch()
+        who.addLayout(line)
 
-        f = self.card(wrap, "Settings file")
-        info = ctk.CTkFrame(f, fg_color="transparent")
-        info.pack(fill="x", padx=16, pady=(14, 6))
+        _, fl = self.card(wrap, "Settings file", spacing=12)
+        info = QGridLayout()
+        info.setHorizontalSpacing(8)
+        info.setVerticalSpacing(3)
+        info.setColumnStretch(1, 1)
         when = datetime.fromtimestamp(p.mtime) if p.mtime else None
         size = p.path.stat().st_size if p.path.exists() else 0
-        for k, v in (("Path", str(p.path)), ("Saved", nice_date(when) if when else "unknown"), ("Size", f"{size:,} bytes"),
-                     ("Keys", str(len(self.orig))), ("Read-only", "yes" if p.locked else "no")):
-            line = ctk.CTkFrame(info, fg_color="transparent")
-            line.pack(fill="x")
-            ctk.CTkLabel(line, text=k, width=90, anchor="w", font=self.f.small, text_color=COL["muted"]).pack(side="left")
-            ctk.CTkLabel(line, text=v, anchor="w", justify="left", font=self.f.tiny_mono, wraplength=720).pack(side="left")
-        btns = ctk.CTkFrame(f, fg_color="transparent")
-        btns.pack(fill="x", padx=16, pady=(6, 14))
-        ctk.CTkButton(btns, text="Open folder", command=lambda: self.open_path(p.folder)).pack(side="left")
-        ctk.CTkButton(btns, text="Back up now", command=self.backup_now).pack(side="left", padx=8)
-        ctk.CTkButton(btns, text="Export a copy", command=self.export_copy).pack(side="left")
-        ctk.CTkButton(btns, text="Import from file", command=self.import_file).pack(side="left", padx=8)
+        for i, (k, v) in enumerate((("Path", soft(p.path)), ("Saved", nice_date(when) if when else "unknown"),
+                                    ("Size", f"{size:,} bytes"), ("Keys", str(len(self.orig))),
+                                    ("Read-only", "yes" if p.locked else "no"))):
+            info.addWidget(label(k, "small", "muted", width=90), i, 0, Qt.AlignTop)
+            info.addWidget(label(v, "tiny_mono", wrap=True), i, 1)
+        fl.addLayout(info)
+        btns = hbox(8)
+        btns.addWidget(button("Open folder", lambda: self.open_path(p.folder)))
+        btns.addWidget(button("Back up now", self.backup_now))
+        btns.addWidget(button("Export a copy", self.export_copy))
+        btns.addWidget(button("Import from file", self.import_file))
+        btns.addStretch()
+        fl.addLayout(btns)
+        wrap.addStretch()
+        self.page_content("Profile", area)
 
     def backup_now(self):
         if self.current:
@@ -2355,64 +3129,76 @@ class App(ctk.CTk):
         p = self.current
         if not p:
             return
-        label = re.sub(r"[^\w-]+", "_", self.store.meta(p.uuid)["label"]) or p.uuid[:8]
-        dest = filedialog.asksaveasfilename(parent=self, defaultextension=".ini", initialfile=f"{label}-GameSettings.ini",
-                                            filetypes=[("Settings file", "*.ini")])
+        name = re.sub(r"[^\w-]+", "_", self.store.meta(p.uuid)["label"]) or p.uuid[:8]
+        dest, _ = QFileDialog.getSaveFileName(self, "Export a copy", str(documents_dir() / f"{name}-GameSettings.ini"),
+                                              "Settings file (*.ini)")
         if dest:
+            if not Path(dest).suffix:
+                dest += ".ini"
             shutil.copyfile(p.path, dest)
             self.toast(f"Exported to {dest}.")
 
     def import_file(self):
-        path = filedialog.askopenfilename(parent=self, filetypes=[("Settings file", "*.ini"), ("All files", "*.*")])
+        path, _ = QFileDialog.getOpenFileName(self, "Import from file", "", "Settings file (*.ini);;All files (*.*)")
         if path:
             self.start_transfer(self.add_extra_source("file", Path(path)))
 
     # transfer tab
 
     def build_transfer_tab(self):
-        t = self.t["Transfer"]
-        top = ctk.CTkFrame(t, fg_color=COL["card"], corner_radius=12)
-        top.pack(fill="x", pady=(2, 8))
-        ctk.CTkLabel(top, text="From", font=self.f.small, text_color=COL["muted"]).pack(side="left", padx=(16, 6), pady=12)
-        self.x_src = ctk.CTkOptionMenu(top, values=[""], width=280, height=34, dynamic_resizing=False, font=self.f.body,
-                                       dropdown_font=self.f.body, command=lambda v: self.pick_source(v))
-        self.x_src.pack(side="left")
-        ctk.CTkButton(top, text="⇄", width=38, height=34, font=self.f.h2, command=self.swap_transfer).pack(side="left", padx=8)
-        ctk.CTkLabel(top, text="To", font=self.f.small, text_color=COL["muted"]).pack(side="left", padx=(0, 6))
-        self.x_tgt = ctk.CTkOptionMenu(top, values=[""], width=280, height=34, dynamic_resizing=False, font=self.f.body,
-                                       dropdown_font=self.f.body, command=lambda v: self.refresh_transfer(rebuild_menus=False, clear=True))
-        self.x_tgt.pack(side="left")
-        self.x_hw = ctk.CTkSwitch(top, text="Hardware keys", font=self.f.small, switch_width=40, switch_height=20,
-                                  command=lambda: self.refresh_transfer(rebuild_menus=False))
-        self.x_hw.pack(side="right", padx=16)
-        self.x_diff = ctk.CTkSwitch(top, text="Differences only", font=self.f.small, switch_width=40, switch_height=20,
-                                    command=lambda: self.refresh_transfer(rebuild_menus=False))
-        self.x_diff.select()
-        self.x_diff.pack(side="right")
-
-        self.x_table = ctk.CTkScrollableFrame(t, fg_color="transparent")
-        self.x_table.pack(fill="both", expand=True)
-
-        bar = ctk.CTkFrame(t, fg_color=COL["card"], corner_radius=10)
-        bar.pack(fill="x", pady=(10, 0))
-        self.x_count = ctk.CTkLabel(bar, text="", font=self.f.body, text_color=COL["muted"])
-        self.x_count.pack(side="left", padx=16, pady=10)
-        self.x_apply = ctk.CTkButton(bar, text="Apply to target", width=170, height=34, fg_color=COL["accent"],
-                                     hover_color=COL["accent_hi"], text_color=COL["ink"], font=self.f.bold, command=self.apply_transfer)
-        self.x_apply.pack(side="right", padx=(6, 10), pady=8)
-        self.x_preset = ctk.CTkButton(bar, text="Save as preset", width=130, height=34, command=self.save_preset)
-        self.x_preset.pack(side="right", padx=6)
-        self.x_delpreset = ctk.CTkButton(bar, text="Delete preset", width=120, height=34, fg_color="transparent",
-                                         border_width=1, border_color=COL["bad_dim"], text_color=COL["bad"],
-                                         hover_color=COL["bad_dim"], command=self.delete_preset)
-        ctk.CTkButton(bar, text="Clear", width=80, height=34, command=lambda: self.select_rows(set())).pack(side="right", padx=6)
-        ctk.CTkButton(bar, text="Select all shown", width=130, height=34,
-                      command=lambda: self.select_rows(set(self.x_rows))).pack(side="right", padx=6)
-        self.write_buttons.append(self.x_apply)
+        v = vbox(0)
+        self.t["Transfer"].setLayout(v)
+        top = Card(COL["card"], 12)
+        tl = hbox(6, (16, 12, 16, 12))
+        top.setLayout(tl)
+        tl.addWidget(label("From", "small", "muted"))
+        self.x_src = Combo([""], height=34)
+        self.x_src.activated.connect(lambda i: self.pick_source(self.x_src.itemText(i)))
+        self.x_tgt = Combo([""], height=34)
+        self.x_tgt.activated.connect(lambda i: self.refresh_transfer(rebuild_menus=False, clear=True))
+        for c in (self.x_src, self.x_tgt):
+            c.setMinimumWidth(150)
+            c.setMaximumWidth(280)
+            c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tl.addWidget(self.x_src, 1)
+        tl.addSpacing(2)
+        tl.addWidget(button("⇄", self.swap_transfer, width=38, height=34, role="h2"))
+        tl.addSpacing(2)
+        tl.addWidget(label("To", "small", "muted"))
+        tl.addWidget(self.x_tgt, 1)
+        tl.addStretch()
+        self.x_diff = Switch("Differences only", 40, 20)
+        self.x_diff.setChecked(True)
+        self.x_diff.clicked.connect(lambda *_: self.refresh_transfer(rebuild_menus=False))
+        self.x_hw = Switch("Hardware keys", 40, 20)
+        self.x_hw.clicked.connect(lambda *_: self.refresh_transfer(rebuild_menus=False))
+        tl.addWidget(self.x_diff)
+        tl.addSpacing(10)
+        tl.addWidget(self.x_hw)
+        v.addWidget(top)
+        v.addSpacing(8)
+        self.x_area, self.x_lay = scroll_area((2, 0, 10, 12))
+        v.addWidget(self.x_area, 1)
+        v.addSpacing(10)
+        bar = Card(COL["card"], 10)
+        bl = hbox(12, (16, 8, 10, 8))
+        bar.setLayout(bl)
+        self.x_count = label("", tone="muted")
+        bl.addWidget(self.x_count)
+        bl.addStretch()
+        bl.addWidget(button("Select all shown", lambda: self.select_rows(set(self.x_rows)), width=130, height=34))
+        bl.addWidget(button("Clear", lambda: self.select_rows(set()), width=80, height=34))
+        self.x_preset = button("Save as preset", self.save_preset, width=130, height=34)
+        self.x_delpreset = button("Delete preset", self.delete_preset, "danger", 120, 34)
+        self.x_delpreset.hide()
+        self.x_apply = button("Apply to target", self.apply_transfer, "primary", 170, 34)
+        for b in (self.x_preset, self.x_delpreset, self.x_apply):
+            bl.addWidget(b)
+        v.addWidget(bar)
 
     def plabel(self, uuid):
-        label = self.store.meta(uuid)["label"]
-        return f"{label}  ({uuid[:8]})" if label else self.store.name(uuid)
+        name = self.store.meta(uuid)["label"]
+        return f"{name}  ({uuid[:8]})" if name else self.store.name(uuid)
 
     def source_options(self):
         opts = {}
@@ -2427,33 +3213,33 @@ class App(ctk.CTk):
     def target_options(self):
         return {self.plabel(p.uuid): p.uuid for p in self.profiles}
 
-    def add_extra_source(self, kind, path, label=None):
-        label = label or f"File: {path.name}"
-        self.x_extra[label] = (kind, path)
-        return self.x_extra[label]
+    def add_extra_source(self, kind, path, name=None):
+        name = name or f"File: {path.name}"
+        self.x_extra[name] = (kind, path)
+        return self.x_extra[name]
 
     def start_transfer(self, src_ref, target_uuid=None):
         self.stale.discard("Transfer")
-        label = next((k for k, v in self.source_options().items() if v == src_ref), None)
+        src_label = next((k for k, v in self.source_options().items() if v == src_ref), None)
         self.refresh_transfer()
-        if label:
-            self.x_src.set(label)
+        if src_label:
+            self.x_src.set(src_label)
         tgt = target_uuid or (self.current.uuid if self.current else None)
-        tl = next((k for k, v in self.target_options().items() if v == tgt), None)
-        if tl:
-            self.x_tgt.set(tl)
+        tgt_label = next((k for k, v in self.target_options().items() if v == tgt), None)
+        if tgt_label:
+            self.x_tgt.set(tgt_label)
         self.refresh_transfer(rebuild_menus=False, clear=True)
         self.tabs.set("Transfer")
 
-    def pick_source(self, label):
-        ref = self.source_options().get(label)
+    def pick_source(self, text):
+        ref = self.source_options().get(text)
         if ref and ref[0] == "open":
-            path = filedialog.askopenfilename(parent=self, filetypes=[("Settings file", "*.ini"), ("All files", "*.*")])
+            path, _ = QFileDialog.getOpenFileName(self, "Open a settings file", "", "Settings file (*.ini);;All files (*.*)")
             if not path:
                 self.x_src.set(self._x_src_last)
                 return
             ref = self.add_extra_source("file", Path(path))
-            self.x_src.configure(values=list(self.source_options()))
+            self.x_src.set_values(list(self.source_options()))
             self.x_src.set(next(k for k, v in self.source_options().items() if v == ref))
         self.refresh_transfer(rebuild_menus=False, clear=True)
 
@@ -2474,17 +3260,19 @@ class App(ctk.CTk):
             return {(s, k): v for s, d in preset.get("values", {}).items() for k, v in d.items()}
         return IniFile.load(ident).values()
 
-    def refresh_transfer(self, rebuild_menus=True, clear=False):
-        with frozen(self.t["Transfer"]):
-            self._refresh_transfer(rebuild_menus, clear)
+    def transfer_message(self, text, tone="muted"):
+        msg = label(text, tone=tone, margins=(0, 40, 0, 0))
+        msg.setAlignment(Qt.AlignHCenter)
+        self.x_lay.addWidget(msg)
 
-    def _refresh_transfer(self, rebuild_menus, clear):
+    def refresh_transfer(self, rebuild_menus=True, clear=False):
         if rebuild_menus:
             src_opts, tgt_opts = list(self.source_options()), list(self.target_options())
-            self.x_src.configure(values=src_opts)
-            self.x_tgt.configure(values=tgt_opts or [""])
+            self.x_src.set_values(src_opts)
+            self.x_tgt.set_values(tgt_opts or [""])
             if self.x_src.get() not in src_opts:
-                others = [k for k, v in self.source_options().items() if v[0] == "profile" and (not self.current or v[1] != self.current.uuid)]
+                others = [k for k, v in self.source_options().items()
+                          if v[0] == "profile" and (not self.current or v[1] != self.current.uuid)]
                 self.x_src.set(others[0] if others else src_opts[0])
             if self.x_tgt.get() not in tgt_opts:
                 cur = next((k for k, v in self.target_options().items() if self.current and v == self.current.uuid), None)
@@ -2492,29 +3280,27 @@ class App(ctk.CTk):
         self._x_src_last = self.x_src.get()
         if clear:
             self.x_sel = set()
-        for w in self.x_table.winfo_children():
-            w.destroy()
-        self.x_rows, self.x_vars = {}, {}
+        clear_layout(self.x_lay)
+        self.x_rows, self.x_vars, self.x_groups = {}, {}, []
         src_ref = self.source_options().get(self.x_src.get())
         tgt_uuid = self.target_options().get(self.x_tgt.get())
-        is_preset = bool(src_ref and src_ref[0] == "preset")
-        self.x_delpreset.pack_forget()
-        if is_preset:
-            self.x_delpreset.pack(side="right", padx=6, before=self.x_preset)
+        self.x_delpreset.setVisible(bool(src_ref and src_ref[0] == "preset"))
         if not src_ref or not tgt_uuid or src_ref[0] == "open":
             self.update_transfer_count()
             return
         if src_ref == ("profile", tgt_uuid):
-            ctk.CTkLabel(self.x_table, text="Pick two different profiles.", text_color=COL["muted"], font=self.f.body).pack(pady=40)
+            self.transfer_message("Pick two different profiles.")
+            self.x_lay.addStretch()
             self.update_transfer_count()
             return
         try:
             src = self.source_values(src_ref)
             tgt = IniFile.load(self.profile_by_uuid(tgt_uuid).path).values()
         except (OSError, AttributeError) as e:
-            ctk.CTkLabel(self.x_table, text=f"Could not read the files.\n{e}", text_color=COL["bad"], font=self.f.body).pack(pady=40)
+            self.transfer_message(f"Could not read the files.\n{e}", "bad")
+            self.x_lay.addStretch()
             return
-        diff_only, include_hw = bool(self.x_diff.get()), bool(self.x_hw.get())
+        diff_only, include_hw = self.x_diff.isChecked(), self.x_hw.isChecked()
         grouped = defaultdict(list)
         total_diff = 0
         for k in src:
@@ -2528,68 +3314,76 @@ class App(ctk.CTk):
             grouped[spec.cat].append((spec, k, src[k], tgt.get(k)))
         self.x_sel &= {k for rows in grouped.values() for _, k, _, _ in rows}
         if not grouped:
-            ctk.CTkLabel(self.x_table, text="Nothing to transfer. The shown settings already match.", text_color=COL["muted"],
-                         font=self.f.body).pack(pady=40)
+            self.transfer_message("Nothing to transfer. The shown settings already match.")
         for cat in CATEGORIES:
             rows = sorted(grouped.get(cat, []), key=lambda r: RANK.get(r[1], 1e9))
             if not rows:
                 continue
-            head = ctk.CTkFrame(self.x_table, fg_color="transparent")
-            head.pack(fill="x", padx=6, pady=(14, 4))
             keys = {k for _, k, _, _ in rows}
-            gvar = tk.IntVar(value=int(keys <= self.x_sel))
-            ctk.CTkCheckBox(head, text=f"{cat.upper()}   {len(rows)}", variable=gvar, font=self.f.caps, text_color=COL["faint"],
-                            checkbox_width=18, checkbox_height=18,
-                            command=lambda keys=keys, gvar=gvar: self.select_rows(self.x_sel | keys if gvar.get() else self.x_sel - keys)).pack(side="left")
-            card = ctk.CTkFrame(self.x_table, fg_color=COL["card"], corner_radius=12)
-            card.pack(fill="x", padx=(2, 10))
-            card.grid_columnconfigure(1, weight=1)
-            sc = ctk.ScalingTracker.get_widget_scaling(card)
-            card.grid_columnconfigure(2, minsize=round(200 * sc))
-            card.grid_columnconfigure(4, minsize=round(200 * sc))
-            label_kw = dict(bg=COL["card"], font=tk_font(card, self.f.mono))
+            head = Check(f"{cat.upper()}   {len(rows)}", 18, F.caps, COL["faint"])
+            head.setChecked(keys <= self.x_sel)
+            head.clicked.connect(lambda *_, keys=keys, head=head: self.select_rows(
+                self.x_sel | keys if head.isChecked() else self.x_sel - keys))
+            holder = QWidget()
+            hl = hbox(0, (6, 14, 6, 4))
+            holder.setLayout(hl)
+            hl.addWidget(head)
+            hl.addStretch()
+            self.x_lay.addWidget(holder)
+            self.x_groups.append((keys, head))
+            _, grid = self.card(self.x_lay, grid=True, margins=(14, 6, 14, 6))
+            grid.setColumnStretch(1, 1)
+            grid.setColumnMinimumWidth(2, 200)
+            grid.setColumnMinimumWidth(4, 200)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(4)
             for i, (spec, k, sv, tv) in enumerate(rows):
-                var = tk.IntVar(value=int(k in self.x_sel))
-                self.x_vars[k] = var
+                chk = Check("", 20)
+                chk.setChecked(k in self.x_sel)
+                chk.clicked.connect(lambda *_, k=k, chk=chk: self.toggle_row(k, chk.isChecked()))
+                self.x_vars[k] = chk
                 self.x_rows[k] = sv
-                label = "Resolution width" if spec.kind == "resolution" else spec.label
-                ctk.CTkCheckBox(card, text="", variable=var, width=24, checkbox_width=20, checkbox_height=20,
-                                command=lambda k=k, var=var: self.toggle_row(k, var.get())).grid(row=i, column=0, padx=(14, 4), pady=4)
-                name = tk.Frame(card, bg=COL["card"])
-                name.grid(row=i, column=1, sticky="w", pady=round(3 * sc))
-                tk.Label(name, text=label, bg=COL["card"], fg=COL["text"], font=tk_font(card, self.f.body)).pack(anchor="w")
-                tk.Label(name, text=spec.path, bg=COL["card"], fg=COL["faint"], font=tk_font(card, self.f.tiny_mono)).pack(anchor="w")
-                same = sv == tv
-                tk.Label(card, text=spec.show(sv), fg=COL["muted"] if same else COL["accent"], **label_kw).grid(
-                    row=i, column=2, sticky="e", padx=round(6 * sc))
-                tk.Label(card, text="→", bg=COL["card"], fg=COL["faint"], font=tk_font(card, self.f.body)).grid(
-                    row=i, column=3, padx=round(6 * sc))
-                tk.Label(card, text=spec.show(tv) if tv is not None else "new key",
-                         fg=COL["muted"] if tv is not None else COL["ok"], **label_kw).grid(
-                    row=i, column=4, sticky="w", padx=(round(6 * sc), round(14 * sc)))
+                name = QWidget()
+                nl = vbox(0)
+                name.setLayout(nl)
+                nl.addWidget(label("Resolution width" if spec.kind == "resolution" else spec.label))
+                nl.addWidget(label(spec.path, "tiny_mono", "faint"))
+                src_label = label(spec.show(sv), "mono", "muted" if sv == tv else "accent")
+                src_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                grid.addWidget(chk, i, 0)
+                grid.addWidget(name, i, 1)
+                grid.addWidget(src_label, i, 2)
+                grid.addWidget(label("→", tone="faint"), i, 3)
+                grid.addWidget(label(spec.show(tv) if tv is not None else "new key", "mono",
+                                     "muted" if tv is not None else "ok"), i, 4)
+        self.x_lay.addStretch()
         hidden = "" if include_hw else "  Hardware keys are hidden."
         self.x_summary = f"{total_diff} difference{'s' if total_diff != 1 else ''}.{hidden}"
         self.update_transfer_count()
 
     def toggle_row(self, k, on):
         (self.x_sel.add if on else self.x_sel.discard)(k)
-        self.update_transfer_count()
+        self.sync_checks()
 
     def select_rows(self, keys):
         self.x_sel = set(keys) & set(self.x_rows)
-        for k, var in self.x_vars.items():
-            var.set(int(k in self.x_sel))
-        self.refresh_transfer(rebuild_menus=False)
+        self.sync_checks()
+
+    def sync_checks(self):
+        for k, chk in self.x_vars.items():
+            chk.setChecked(k in self.x_sel)
+        for keys, head in self.x_groups:
+            head.setChecked(keys <= self.x_sel)
+        self.update_transfer_count()
 
     def update_transfer_count(self):
         n = len(self.x_sel)
-        summary = getattr(self, "x_summary", "")
-        self.x_count.configure(text=f"{n} selected   ·   {summary}" if self.x_rows else summary,
-                               text_color=COL["accent"] if n else COL["muted"])
+        self.x_count.setText(f"{n} selected   ·   {self.x_summary}" if self.x_rows else self.x_summary)
+        restyle(self.x_count, tone="accent" if n else "muted")
         tgt = self.x_tgt.get().split("  (")[0]
-        self.x_apply.configure(text=f"Apply to {tgt[:22]}" if tgt else "Apply to target")
-        set_primary(self.x_apply, bool(n) and not self.running)
-        self.x_preset.configure(state="normal" if n else "disabled")
+        self.x_apply.setText(f"Apply to {tgt[:22]}" if tgt else "Apply to target")
+        self.x_apply.setEnabled(bool(n) and not self.running)
+        self.x_preset.setEnabled(bool(n))
 
     def apply_transfer(self):
         keys = [k for k in self.x_rows if k in self.x_sel]
@@ -2598,11 +3392,11 @@ class App(ctk.CTk):
         if not keys or not src_ref or not target or self.blocked():
             return
         if self.current and target.uuid == self.current.uuid and self.pending:
-            messagebox.showinfo(APP_NAME, "This profile has unsaved edits in the Settings tab. Save or revert them first.", parent=self)
+            show_msg(self, "info", "This profile has unsaved edits in the Settings tab. Save or revert them first.")
             return
         src_name = self.x_src.get().split("  (")[0]
-        if not messagebox.askyesno(APP_NAME, f"Copy {len(keys)} setting{'s' if len(keys) != 1 else ''} from {src_name} to "
-                                             f"{self.store.name(target.uuid)}?\n\nA backup of the target is saved first.", parent=self):
+        if not ask_yes_no(self, f"Copy {len(keys)} setting{'s' if len(keys) != 1 else ''} from {src_name} to "
+                                f"{self.store.name(target.uuid)}?\n\nA backup of the target is saved first."):
             return
         try:
             src = self.source_values(src_ref)
@@ -2611,7 +3405,7 @@ class App(ctk.CTk):
                 ini.set(*k, src[k])
             write_profile(self.store, target, ini, f"before transfer from {src_name}")
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"The transfer failed. The target was not changed.\n\n{e}", parent=self)
+            show_msg(self, "error", f"The transfer failed. The target was not changed.\n\n{e}")
             return
         self.toast(f"Copied {len(keys)} settings to {self.store.name(target.uuid)}. A backup was saved.")
         if self.current and target.uuid == self.current.uuid:
@@ -2626,11 +3420,11 @@ class App(ctk.CTk):
         src_ref = self.source_options().get(self.x_src.get())
         if not keys or not src_ref:
             return
-        name = (ctk.CTkInputDialog(title="Save preset", text="Name for this preset, for example Sens only").get_input() or "").strip()
+        name = ask_text(self, "Save preset", "Name for this preset, for example Sens only").strip()
         if not name:
             return
         presets = self.store.data["presets"]
-        if name in presets and not messagebox.askyesno(APP_NAME, f'Replace the preset "{name}"?', parent=self):
+        if name in presets and not ask_yes_no(self, f'Replace the preset "{name}"?'):
             return
         src = self.source_values(src_ref)
         values = {}
@@ -2644,7 +3438,7 @@ class App(ctk.CTk):
 
     def delete_preset(self):
         ref = self.source_options().get(self.x_src.get())
-        if ref and ref[0] == "preset" and messagebox.askyesno(APP_NAME, f'Delete the preset "{ref[1]}"?', parent=self):
+        if ref and ref[0] == "preset" and ask_yes_no(self, f'Delete the preset "{ref[1]}"?'):
             self.store.data["presets"].pop(ref[1], None)
             self.store.save()
             self.refresh_transfer()
@@ -2652,26 +3446,32 @@ class App(ctk.CTk):
     # backups tab
 
     def refresh_backups(self):
-        t = self.t["Backups"]
-        for w in t.winfo_children():
-            w.destroy()
         p = self.current
         if not p:
+            self.page_content("Backups")
             return
-        top = ctk.CTkFrame(t, fg_color="transparent")
-        top.pack(fill="x", pady=(2, 8))
-        ctk.CTkLabel(top, text=f"Backups of {self.store.name(p.uuid)}", font=self.f.h2).pack(side="left", padx=6)
-        ctk.CTkLabel(top, text=f"The app saves one before every change and keeps the last {MAX_BACKUPS}.",
-                     font=self.f.small, text_color=COL["faint"]).pack(side="left", padx=12)
-        ctk.CTkButton(top, text="Open folder", command=lambda: (self.store.backup_dir(p.uuid).mkdir(parents=True, exist_ok=True),
-                                                                self.open_path(self.store.backup_dir(p.uuid)))).pack(side="right")
-        ctk.CTkButton(top, text="Back up now", command=lambda: (self.backup_now(), self.refresh_backups())).pack(side="right", padx=8)
-        lst = ctk.CTkScrollableFrame(t, fg_color="transparent")
-        lst.pack(fill="both", expand=True)
+        page = QWidget()
+        v = vbox(8)
+        page.setLayout(v)
+        top = hbox(12, (6, 2, 0, 0))
+        top.addWidget(label(f"Backups of {self.store.name(p.uuid)}", "h2"))
+        note = label(f"The app saves one before every change and keeps the last {MAX_BACKUPS}.", "small", "faint")
+        note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(note, 1)
+        top.addWidget(button("Back up now", lambda: (self.backup_now(), self.refresh_backups())))
+        top.addWidget(button("Open folder", lambda: (self.store.backup_dir(p.uuid).mkdir(parents=True, exist_ok=True),
+                                                     self.open_path(self.store.backup_dir(p.uuid)))))
+        v.addLayout(top)
+        area, lst = scroll_area((2, 0, 10, 12), 6)
+        v.addWidget(area, 1)
+        self.page_content("Backups", page)
         backups = self.store.backups(p.uuid)
         if not backups:
-            ctk.CTkLabel(lst, text="No backups yet. One is saved automatically before the first change.",
-                         text_color=COL["muted"], font=self.f.body).pack(pady=40)
+            msg = label("No backups yet. One is saved automatically before the first change.", tone="muted",
+                        margins=(0, 40, 0, 0))
+            msg.setAlignment(Qt.AlignHCenter)
+            lst.addWidget(msg)
+            lst.addStretch()
             return
         try:
             cur = IniFile.load(p.path).values()
@@ -2683,30 +3483,34 @@ class App(ctk.CTk):
             except OSError:
                 continue
             n = sum(1 for k in set(vals) | set(cur) if vals.get(k) != cur.get(k))
-            row = ctk.CTkFrame(lst, fg_color=COL["card"], corner_radius=10)
-            row.pack(fill="x", pady=3, padx=(2, 10))
-            ctk.CTkLabel(row, text=nice_date(b.when), font=self.f.bold, width=190, anchor="w").pack(side="left", padx=14, pady=10)
-            ctk.CTkLabel(row, text=b.reason, font=self.f.body, text_color=COL["muted"], anchor="w").pack(side="left")
-            ctk.CTkButton(row, text="Delete", width=70, height=30, fg_color="transparent", text_color=COL["bad"],
-                          hover_color=COL["bad_dim"], command=lambda b=b: self.delete_backup(b)).pack(side="right", padx=(4, 12))
-            restore = ctk.CTkButton(row, text="Restore", width=80, height=30, command=lambda b=b: self.restore_backup(b))
-            restore.pack(side="right", padx=4)
-            restore.configure(state="disabled" if self.running or not n else "normal")
-            ctk.CTkButton(row, text="Compare", width=80, height=30,
-                          command=lambda b=b: self.start_transfer(self.add_extra_source("backup", b.path, f"Backup: {nice_date(b.when)}"), p.uuid)).pack(side="right", padx=4)
-            ctk.CTkLabel(row, text=f"{n} difference{'s' if n != 1 else ''}" if n else "same as current", font=self.f.small,
-                         text_color=COL["accent"] if n else COL["faint"], width=110).pack(side="right", padx=10)
+            row = Card(COL["card"], 10)
+            rl = hbox(8, (14, 8, 12, 8))
+            row.setLayout(rl)
+            rl.addWidget(label(nice_date(b.when), "bold", width=190))
+            rl.addWidget(label(b.reason, tone="muted"), 1)
+            diff = label(f"{n} difference{'s' if n != 1 else ''}" if n else "same as current", "small",
+                         "accent" if n else "faint", width=110)
+            diff.setAlignment(Qt.AlignCenter)
+            rl.addWidget(diff)
+            rl.addWidget(button("Compare", lambda b=b: self.start_transfer(
+                self.add_extra_source("backup", b.path, f"Backup: {nice_date(b.when)}"), p.uuid), width=80))
+            restore = button("Restore", lambda b=b: self.restore_backup(b), width=80)
+            restore.setEnabled(not self.running and bool(n))
+            rl.addWidget(restore)
+            rl.addWidget(button("Delete", lambda b=b: self.delete_backup(b), "ghost", 70))
+            lst.addWidget(row)
+        lst.addStretch()
 
     def restore_backup(self, b):
         p = self.current
         if not p or self.blocked() or not self.confirm_discard():
             return
-        if not messagebox.askyesno(APP_NAME, f"Restore the backup from {nice_date(b.when)}?\n\nThe current file is backed up first.", parent=self):
+        if not ask_yes_no(self, f"Restore the backup from {nice_date(b.when)}?\n\nThe current file is backed up first."):
             return
         try:
             write_profile(self.store, p, IniFile.load(b.path), "before restore")
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"Restore failed.\n\n{e}", parent=self)
+            show_msg(self, "error", f"Restore failed.\n\n{e}")
             return
         self.reload_current()
         self.tabs.set("Backups")
@@ -2714,86 +3518,102 @@ class App(ctk.CTk):
         self.toast("Backup restored.")
 
     def delete_backup(self, b):
-        if messagebox.askyesno(APP_NAME, f"Delete the backup from {nice_date(b.when)}?", parent=self):
+        if ask_yes_no(self, f"Delete the backup from {nice_date(b.when)}?"):
             b.path.unlink(missing_ok=True)
             self.refresh_backups()
 
     # benchmarks tab
 
     def build_bench_tab(self):
-        t = self.t["Benchmarks"]
-        t.grid_columnconfigure(1, weight=1)
-        t.grid_rowconfigure(0, weight=1)
-        left = ctk.CTkFrame(t, fg_color="transparent", width=310)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
-        left.pack_propagate(False)
-        ctk.CTkLabel(left, text="AVERAGE FPS PER RUN", font=self.f.caps, text_color=COL["faint"], anchor="w").pack(fill="x", padx=6, pady=(4, 6))
-        hist = ctk.CTkFrame(left, fg_color=COL["card"], corner_radius=12)
-        hist.pack(fill="x")
-        self.b_hist = BarChart(hist, lambda i: self.show_bench(len(self.benches) - 1 - i))
-        self.b_hist.pack(fill="x", padx=8, pady=8)
-        self.b_list = ctk.CTkScrollableFrame(left, fg_color="transparent")
-        self.b_list.pack(fill="both", expand=True, pady=(8, 0))
-        right = ctk.CTkScrollableFrame(t, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        self.b_title = ctk.CTkLabel(right, text="", font=self.f.h2, anchor="w")
-        self.b_title.pack(fill="x", padx=6, pady=(4, 8))
-        tiles = ctk.CTkFrame(right, fg_color="transparent")
-        tiles.pack(fill="x")
+        h = hbox(12)
+        self.t["Benchmarks"].setLayout(h)
+        left = QWidget()
+        left.setFixedWidth(310)
+        lv = vbox(0)
+        left.setLayout(lv)
+        lv.addWidget(label("AVERAGE FPS PER RUN", "caps", "faint", margins=(6, 4, 6, 6)))
+        _, hl = self.card(lv, margins=(8, 8, 8, 8))
+        self.b_hist = BarChart(lambda i: self.show_bench(i))
+        hl.addWidget(self.b_hist)
+        lv.addSpacing(8)
+        self.b_list, self.b_list_lay = scroll_area((0, 0, 8, 4), 6)
+        lv.addWidget(self.b_list, 1)
+        h.addWidget(left)
+        right, rv = scroll_area((0, 0, 10, 12), 0)
+        h.addWidget(right, 1)
+        self.b_title = label("", "h2", margins=(6, 4, 6, 8))
+        rv.addWidget(self.b_title)
+        tiles = QGridLayout()
+        tiles.setSpacing(8)
         self.b_tiles = []
         for i in range(8):
-            tile = ctk.CTkFrame(tiles, fg_color=COL["card"], corner_radius=12)
-            tile.grid(row=i // 4, column=i % 4, sticky="ew", padx=4, pady=4)
-            tiles.grid_columnconfigure(i % 4, weight=1)
-            v = ctk.CTkLabel(tile, text="", font=self.f.tile, anchor="w")
-            v.pack(fill="x", padx=14, pady=(10, 0))
-            c = ctk.CTkLabel(tile, text="", font=self.f.small, text_color=COL["muted"], anchor="w", height=16)
-            c.pack(fill="x", padx=14, pady=(0, 10))
+            tile = Card(COL["card"], 12)
+            tv = vbox(0, (14, 10, 14, 10))
+            tile.setLayout(tv)
+            v, c = label("", "tile"), label("", "small", "muted")
+            tv.addWidget(v)
+            tv.addWidget(c)
+            tiles.addWidget(tile, i // 4, i % 4)
+            tiles.setColumnStretch(i % 4, 1)
             self.b_tiles.append((v, c))
-        chart = self.card(right, "Frame rate over the run")
-        opts = ctk.CTkFrame(chart, fg_color="transparent")
-        opts.pack(fill="x", padx=12, pady=(10, 0))
-        self.b_cpu = ctk.CTkSwitch(opts, text="CPU frame time", font=self.f.small, switch_width=36, switch_height=18,
-                                   command=lambda: self.show_bench(self.bench_sel))
-        self.b_cpu.pack(side="left")
-        self.b_gpu = ctk.CTkSwitch(opts, text="GPU frame time", font=self.f.small, switch_width=36, switch_height=18,
-                                   command=lambda: self.show_bench(self.bench_sel))
-        self.b_gpu.pack(side="left", padx=12)
-        self.b_cmp = ctk.CTkOptionMenu(opts, values=["Compare with: none"], width=260, height=28, dynamic_resizing=False,
-                                       font=self.f.small, dropdown_font=self.f.small, command=lambda v: self.show_bench(self.bench_sel))
-        self.b_cmp.pack(side="right")
-        self.b_chart = LineChart(chart)
-        self.b_chart.pack(fill="x", padx=8, pady=8)
-        info = ctk.CTkFrame(right, fg_color="transparent")
-        info.pack(fill="x")
-        info.grid_columnconfigure((0, 1), weight=1, uniform="info")
-        self.b_sys = ctk.CTkFrame(info, fg_color=COL["card"], corner_radius=12)
-        self.b_sys.grid(row=0, column=0, sticky="nsew", padx=(4, 4), pady=(12, 4))
-        self.b_set = ctk.CTkFrame(info, fg_color=COL["card"], corner_radius=12)
-        self.b_set.grid(row=0, column=1, sticky="nsew", padx=(4, 10), pady=(12, 4))
-        btns = ctk.CTkFrame(right, fg_color="transparent")
-        btns.pack(fill="x", pady=10)
-        self.b_open = ctk.CTkButton(btns, text="Open full report", command=lambda: self.bench_sel is not None and self.benches[self.bench_sel].html and self.open_path(self.benches[self.bench_sel].html))
-        self.b_open.pack(side="left", padx=4)
-        ctk.CTkButton(btns, text="Open benchmark folder", command=lambda: self.open_path(self.root_dir / "Benchmark")).pack(side="left", padx=4)
+        rv.addLayout(tiles)
+        _, cl = self.card(rv, "Frame rate over the run", margins=(8, 10, 8, 8))
+        opts = hbox(12, (4, 0, 4, 0))
+        self.b_cpu = Switch("CPU frame time", 36, 18)
+        self.b_gpu = Switch("GPU frame time", 36, 18)
+        for s in (self.b_cpu, self.b_gpu):
+            s.clicked.connect(lambda *_: self.show_bench(self.bench_sel))
+            opts.addWidget(s)
+        opts.addStretch()
+        self.b_cmp = Combo(["Compare with: none"], 260, 28, role="small")
+        self.b_cmp.setCurrentIndex(0)
+        self.b_cmp.activated.connect(lambda i: self.show_bench(self.bench_sel))
+        opts.addWidget(self.b_cmp)
+        cl.addLayout(opts)
+        self.b_chart = LineChart()
+        cl.addWidget(self.b_chart)
+        info = QGridLayout()
+        info.setHorizontalSpacing(8)
+        info.setColumnStretch(0, 1)
+        info.setColumnStretch(1, 1)
+        boxes = []
+        for col in range(2):
+            box = Card(COL["card"], 12)
+            bl = vbox(4, (14, 12, 14, 12))
+            box.setLayout(bl)
+            info.addWidget(box, 0, col)
+            boxes.append(bl)
+        self.b_sys_lay, self.b_set_lay = boxes
+        rv.addSpacing(12)
+        rv.addLayout(info)
+        btns = hbox(8, (0, 10, 0, 0))
+        self.b_open = button("Open full report", lambda: self.bench_sel is not None and self.benches[self.bench_sel].html
+                             and self.open_path(self.benches[self.bench_sel].html))
+        btns.addWidget(self.b_open)
+        btns.addWidget(button("Open benchmark folder", lambda: self.open_path(self.root_dir / "Benchmark")))
+        btns.addStretch()
+        rv.addLayout(btns)
+        rv.addStretch()
 
     def refresh_bench(self):
         self.benches = scan_benchmarks(self.root_dir)
-        for w in self.b_list.winfo_children():
-            w.destroy()
-        if not self.benches:
-            ctk.CTkLabel(self.b_list, text="No benchmark runs found.\nRun the benchmark from the game's graphics settings.",
-                         text_color=COL["muted"], font=self.f.small, justify="left").pack(pady=20, padx=8)
-            self.b_hist.plot([], None)
-            self.b_title.configure(text="")
-            return
+        clear_layout(self.b_list_lay)
         self.b_items = []
+        if not self.benches:
+            self.b_list_lay.addWidget(label("No benchmark runs found.\nRun the benchmark from the game's graphics settings.",
+                                            "small", "muted", wrap=True, margins=(8, 20, 8, 0)))
+            self.b_list_lay.addStretch()
+            self.b_hist.plot([], None)
+            self.b_title.setText("")
+            return
         for i in range(len(self.benches) - 1, -1, -1):
-            b = self.benches[i]
-            item = BenchItem(self.b_list, self, b, lambda i=i: self.show_bench(i))
-            item.pack(fill="x", pady=3, padx=(0, 6))
+            item = BenchItem(self.benches[i], lambda i=i: self.show_bench(i))
+            self.b_list_lay.addWidget(item)
             self.b_items.append((i, item))
-        self.b_cmp.configure(values=["Compare with: none"] + [f"Compare with: {nice_date(b.when)}" for b in reversed(self.benches)])
+        self.b_list_lay.addStretch()
+        self.b_cmp.set_values(["Compare with: none"] + [f"Compare with: {nice_date(b.when)}" for b in reversed(self.benches)])
+        if self.b_cmp.currentIndex() < 0:
+            self.b_cmp.setCurrentIndex(0)
         self.show_bench(len(self.benches) - 1)
 
     def bench_detail(self, b):
@@ -2813,7 +3633,7 @@ class App(ctk.CTk):
         s, x = b.stats, d.get("extra", {})
         fps = d.get("fps", np.array([]))
         p1 = float(np.percentile(fps, 1)) if fps.size else None
-        self.b_title.configure(text=f"Run from {nice_date(b.when)}")
+        self.b_title.setText(f"Run from {nice_date(b.when)}")
 
         def f(v, fmt):
             return fmt.format(v) if v is not None else "n/a"
@@ -2823,8 +3643,8 @@ class App(ctk.CTk):
                  (f(s.get("RawFrameTimes"), "{:.1f} s"), "duration"), (f(s.get("RawFrameCounts"), "{:,.0f}"), "frames"),
                  (f(x.get("gpu_load"), "{:.0f}%"), "GPU load"), (f(x.get("gpu_temperature"), "{:.0f} °C"), "GPU temperature")]
         for (vl, cl), (v, c) in zip(self.b_tiles, tiles):
-            vl.configure(text=v)
-            cl.configure(text=c)
+            vl.setText(v)
+            cl.setText(c)
         series = [{"y": fps, "color": COL["accent"], "label": "FPS", "unit": " fps", "axis": "l", "width": 2}]
         cmp_label = self.b_cmp.get().removeprefix("Compare with: ")
         other = next((o for o in self.benches if nice_date(o.when) == cmp_label and o is not b), None)
@@ -2832,9 +3652,9 @@ class App(ctk.CTk):
             ofps = self.bench_detail(other).get("fps", np.array([]))
             series.append({"y": ofps, "color": COL["info"], "label": f"FPS {cmp_label}", "unit": " fps", "axis": "l",
                            "width": 1.5, "dash": (4, 3)})
-        if self.b_cpu.get():
+        if self.b_cpu.isChecked():
             series.append({"y": d.get("cpu", np.array([])), "color": COL["ok"], "label": "CPU ms", "unit": " ms", "axis": "r", "width": 1.5})
-        if self.b_gpu.get():
+        if self.b_gpu.isChecked():
             series.append({"y": d.get("gpu", np.array([])), "color": COL["violet"], "label": "GPU ms", "unit": " ms", "axis": "r", "width": 1.5})
         self.b_chart.plot(series, s.get("RawFrameTimes"))
         rows = list(d.get("system", {}).items())
@@ -2844,23 +3664,25 @@ class App(ctk.CTk):
             rows.append(("ram", f"{x['ram_used']:.2f} of {x.get('sys_ram_total') or 0:.2f} GB"))
         if s.get("LoadingTime") is not None:
             rows.append(("loading time", f"{s['LoadingTime']:,.0f} (unit not documented, likely ms)"))
-        self.fill_kv(self.b_sys, "System", [(k.replace("_", " ").upper() if len(k) <= 4 else k.capitalize(), v) for k, v in rows])
-        self.fill_kv(self.b_set, "Settings used", d.get("settings", []) or [("", "Open the full report for details.")])
-        self.b_open.configure(state="normal" if b.html else "disabled")
+        self.fill_kv(self.b_sys_lay, "System", [(k.replace("_", " ").upper() if len(k) <= 4 else k.capitalize(), v) for k, v in rows])
+        self.fill_kv(self.b_set_lay, "Settings used", d.get("settings", []) or [("", "Open the full report for details.")])
+        self.b_open.setEnabled(bool(b.html))
         self.b_hist.plot([(nice_date(o.when), o.stats.get("Fps")) for o in self.benches], i)
-        for j, item in getattr(self, "b_items", []):
+        for j, item in self.b_items:
             item.set_selected(j == i)
 
-    def fill_kv(self, frame, title, rows):
-        for w in frame.winfo_children():
-            w.destroy()
-        ctk.CTkLabel(frame, text=title.upper(), font=self.f.caps, text_color=COL["faint"], anchor="w").pack(fill="x", padx=14, pady=(12, 4))
-        for k, v in rows:
-            line = ctk.CTkFrame(frame, fg_color="transparent")
-            line.pack(fill="x", padx=14)
-            ctk.CTkLabel(line, text=k, width=120, anchor="w", font=self.f.small, text_color=COL["muted"], height=22).pack(side="left")
-            ctk.CTkLabel(line, text=v.strip(), anchor="w", font=self.f.small, height=22, wraplength=210, justify="left").pack(side="left", fill="x")
-        ctk.CTkFrame(frame, height=10, fg_color="transparent").pack()
+    def fill_kv(self, lay, title, rows):
+        clear_layout(lay)
+        lay.addWidget(label(title.upper(), "caps", "faint", margins=(0, 0, 0, 4)))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(5)
+        grid.setColumnStretch(1, 1)
+        for i, (k, v) in enumerate(rows):
+            grid.addWidget(label(k, "small", "muted", width=120), i, 0, Qt.AlignTop)
+            grid.addWidget(label(v.strip(), "small", wrap=True), i, 1)
+        lay.addLayout(grid)
+        lay.addStretch()
 
     # tabs, polling, close
 
@@ -2878,9 +3700,9 @@ class App(ctk.CTk):
             return
         self.running = running
         if running:
-            self.h_game.configure(text="  Siege is running · saving is paused  ", fg_color=COL["bad_dim"], text_color=COL["bad"])
+            self.h_game.set("Siege is running · saving is paused", COL["bad_dim"], COL["bad"])
         else:
-            self.h_game.configure(text="  Siege is closed  ", fg_color=COL["ok_dim"], text_color=COL["ok"])
+            self.h_game.set("Siege is closed", COL["ok_dim"], COL["ok"])
         self.update_dirty()
         self.update_transfer_count()
         if self.tabs.get() == "Backups":
@@ -2888,17 +3710,22 @@ class App(ctk.CTk):
         else:
             self.stale.add("Backups")
 
+    def _poll_game(self):
+        running = siege_running()
+        try:
+            self.game_state.emit(running)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _on_game(self, running):
+        self._polling = False
+        self.set_running(running)
+
     def poll(self):
         now = time.monotonic()
         if not self._polling and now - self._last_poll > 4:
             self._polling, self._last_poll = True, now
-            threading.Thread(target=lambda: self._poll_q.put(siege_running()), daemon=True).start()
-        try:
-            while True:
-                self.set_running(self._poll_q.get_nowait())
-                self._polling = False
-        except queue.Empty:
-            pass
+            threading.Thread(target=self._poll_game, daemon=True).start()
         if self.current:
             m = self.current.mtime
             if m != self.file_mtime:
@@ -2908,42 +3735,29 @@ class App(ctk.CTk):
                 else:
                     self.reload_current()
                     self.toast("The settings file changed on disk and was reloaded.", "info")
-        self.after(1000, self.poll)
 
-    def on_close(self):
+    def closeEvent(self, e):
+        self.commit_focus()
         if not self.confirm_discard():
+            e.ignore()
             return
-        self.store.data["settings"]["geometry"] = self.geometry()
+        self.poll_timer.stop()
+        self.store.data["settings"]["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         try:
             self.store.save()
         except OSError:
             pass
-        self.destroy()
-
-
-class BenchItem(Hover, ctk.CTkFrame):
-    def __init__(self, master, app, bench, command):
-        super().__init__(master, fg_color=COL["card"], corner_radius=10, border_width=0, border_color=COL["accent"])
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=(8, 0))
-        ctk.CTkLabel(top, text=nice_date(bench.when), font=app.f.bold, anchor="w", height=20).pack(side="left")
-        fps = bench.stats.get("Fps")
-        ctk.CTkLabel(top, text=f"{fps:.0f} fps" if fps else "", font=app.f.bold, text_color=COL["accent"], height=20).pack(side="right")
-        lo, hi = bench.stats.get("LowestFps"), bench.stats.get("HighestFps")
-        sub = f"low {lo:.0f}  ·  high {hi:.0f}" if lo is not None and hi is not None else ""
-        ctk.CTkLabel(self, text=sub, font=app.f.small, text_color=COL["muted"], anchor="w", height=18).pack(fill="x", padx=12, pady=(0, 8))
-        self.hover_bind(COL["card"], COL["card_hi"])
-        bind_tree(self, "<Button-1>", lambda e: command())
-
-    def set_selected(self, on):
-        self.configure(border_width=2 if on else 0)
+        e.accept()
 
 
 def main():
     parser = argparse.ArgumentParser(prog="r6_siege_settings_manager")
     parser.add_argument("--root", help="folder that holds the profile UUID folders")
     args = parser.parse_args()
-    App(args.root).mainloop()
+    app = qt_app()
+    win = App(args.root)
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
