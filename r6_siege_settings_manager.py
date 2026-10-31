@@ -11,7 +11,6 @@ import os
 import queue
 import re
 import shutil
-import socket
 import stat
 import subprocess
 import sys
@@ -20,7 +19,7 @@ import time
 import tkinter as tk
 import webbrowser
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +30,7 @@ import customtkinter as ctk
 import numpy as np
 
 APP_NAME = "R6 Siege Settings Manager"
-__version__ = "0.1.0"
+__version__ = "0.2"
 SETTINGS_FILE = "GameSettings.ini"
 MAX_BACKUPS = 50
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -68,6 +67,13 @@ def documents_dir():
     return Path.home() / "Documents"
 
 
+if sys.platform == "win32":
+    from ctypes import wintypes
+    _send_message = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)(
+        ("SendMessageW", ctypes.windll.user32))
+    _redraw_window = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)(
+        ("RedrawWindow", ctypes.windll.user32))
+
 DEFAULT_ROOT = documents_dir() / "My Games" / "Rainbow Six - Siege"
 APP_DIR = Path(os.environ.get("R6SM_DATA") or Path(os.environ.get("APPDATA") or Path.home()) / "R6SiegeSettingsManager")
 
@@ -102,27 +108,6 @@ def display_modes():
     except (OSError, AttributeError):
         pass
     return modes
-
-
-def ping_region(region, tries=3):
-    try:
-        addr = socket.getaddrinfo(f"gamelift-ping.{region}.api.aws", 7770, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
-    except OSError:
-        return None
-    best = None
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(1.0)
-        for _ in range(tries):
-            t0 = time.perf_counter()
-            try:
-                s.sendto(b"r6sm-ping", addr)
-                s.recvfrom(512)
-                rtt = (time.perf_counter() - t0) * 1000
-                best = rtt if best is None else min(best, rtt)
-            except OSError:
-                pass
-            time.sleep(0.4)
-    return best
 
 
 def siege_running():
@@ -267,6 +252,8 @@ class Spec:
     unit: str = ""
     hw: bool = False
     ini_only: bool = False
+    scale: float = 1
+    offset: float = 0
 
     def __post_init__(self):
         if self.kind == "toggle" and not self.choices:
@@ -291,7 +278,7 @@ class Spec:
                 return "Off"
             if self.kind == "refresh" and v == 0:
                 return "Auto"
-            return f"{v:.{self.digits}f}{self.unit}"
+            return f"{self.offset + self.scale * v:.{self.digits}f}{self.unit}"
         if self.kind == "resolution":
             return "Auto" if value == "0" else f"{value} px"
         return value
@@ -309,8 +296,6 @@ SCOPE_LABELS = {s: {"1xHalf": "1.5x", "2xHalf": "2.5x"}.get(s, s) for s in SCOPE
 GROUP_NOTES = {
     ("Graphics", "Quality"): "Labels follow the in-game menu order. The index mapping comes from community files, "
                              "not from Ubisoft.",
-    ("Graphics", "Upscaling and render scale"): "Ubisoft does not document how these values are encoded. "
-                                                "They are shown as stored.",
     ("Mouse", "Aim down sights"): "At 50, every sight matches hipfire by monitor distance.",
 }
 DEG_PER_COUNT = 0.00572957795
@@ -336,8 +321,9 @@ def _schema():
     add(D, "Screen", "DISPLAY_SETTINGS.RefreshRate", "Refresh rate", "refresh", "Auto lets DirectX pick the rate.",
         unit=" Hz", digits=3)
     add(D, "Screen", "DISPLAY_SETTINGS.AspectRatio", "Aspect ratio", "choice",
-        "2 and up are fixed ratios. Benchmark reports show 2 as 5:4.",
-        choices={"0": "Match display", "1": "Match resolution", "2": "5:4"})
+        "Display (0) comes from the file's own comment and is not in the game menu.",
+        choices={str(i): r for i, r in enumerate(["Display", "Resolution", "5:4", "4:3", "3:2", "16:10", "5:3", "16:9",
+                                                  "19:10", "21:9"])})
     add(D, "Screen", "DISPLAY_SETTINGS.UseLetterbox", "Widescreen letterbox", "toggle")
     add(D, "Screen", "DISPLAY_SETTINGS.Monitor", "Monitor", "number", "Index of the display the game opens on.", hw=True)
     add(D, "Picture", "DISPLAY_SETTINGS.DefaultFOV", "Field of view", "range", "Vertical field of view.",
@@ -366,19 +352,26 @@ def _schema():
         add(G, "Quality", f"CUSTOM_QUALITY.{key}", label, "choice", choices={str(i): l for i, l in enumerate(labels)})
     add(G, "Quality", "CUSTOM_QUALITY.DOF", "Zoom-in depth of field", "toggle")
     add(G, "Quality", "CUSTOM_QUALITY.Atmospheric", "Atmospheric", "number", "Custom files hold -1. Meaning not documented.")
-    add(G, "Anti-aliasing", "CUSTOM_QUALITY.AntiAliasing", "Anti-aliasing", "number",
-        "The menu offers Off, FXAA and T-AA. The index order is not documented.")
-    add(G, "Anti-aliasing", "CUSTOM_QUALITY.Sharpness", "T-AA sharpness", "range",
-        "Stored as 0 to 20. The menu appears to show the value times 5.", lo=0, hi=20)
-    add(G, "Upscaling and render scale", "CUSTOM_QUALITY.Upscaler", "Upscaler", "number",
-        "The menu offers NVIDIA DLSS, AMD FSR 1.0 and AMD FSR 2.0.")
-    add(G, "Upscaling and render scale", "CUSTOM_QUALITY.TemporalUpscalerMode", "Temporal upscaler mode", "number")
-    for key, label in [("DLSSPerfQual", "DLSS mode"), ("FSR2PerfQual", "FSR 2 mode"), ("FSRPerfQual", "FSR 1 mode")]:
-        add(G, "Upscaling and render scale", f"CUSTOM_QUALITY.{key}", label, "number",
-            "Quality, Balanced, Performance or Ultra Performance.")
-    add(G, "Upscaling and render scale", "CUSTOM_QUALITY.RenderScalingFactor", "Render scaling", "number")
-    add(G, "Upscaling and render scale", "CUSTOM_QUALITY.AdaptiveRenderScalingTargetFPS",
-        "Adaptive render scaling target", "number", "0 turns adaptive scaling off.")
+    up = "Upscaling"
+    add(G, up, "CUSTOM_QUALITY.Upscaler", "Upscaling technique", "choice",
+        "Off and Temporal are confirmed. The order of DLSS and the two FSR versions is inferred.",
+        choices={"0": "Off", "1": "Temporal", "2": "NVIDIA DLSS", "3": "AMD FSR 1.0", "4": "AMD FSR 2.0"})
+    add(G, up, "CUSTOM_QUALITY.TemporalUpscalerMode", "Upscaling mode", "choice",
+        choices={"0": "Fixed render scaling", "1": "Adaptive render scaling"})
+    add(G, up, "CUSTOM_QUALITY.RenderScalingFactor", "Render scaling", "range", "Used in fixed mode.",
+        lo=25, hi=100, step=5, scale=5, offset=25, unit="%")
+    add(G, up, "CUSTOM_QUALITY.AdaptiveRenderScalingTargetFPS", "Adaptive render scaling target", "range",
+        "Used in adaptive mode. The range is read from the menu slider and may be slightly off.",
+        lo=30, hi=330, step=5, scale=5, offset=5, unit=" fps")
+    add(G, up, "CUSTOM_QUALITY.AntiAliasing", "Anti-aliasing mode", "choice",
+        "T-AA is confirmed. FXAA and Off are inferred.", choices={"0": "T-AA", "1": "FXAA", "2": "Off"})
+    add(G, up, "CUSTOM_QUALITY.Sharpness", "Anti-aliasing sharpness", "range", lo=0, hi=100, step=5, scale=5)
+    modes = ["Performance", "Balanced", "Quality", "Ultra Performance"]
+    for key, label, names in [("DLSSPerfQual", "DLSS mode", modes), ("FSR2PerfQual", "FSR 2.0 mode", modes),
+                              ("FSRPerfQual", "FSR 1.0 mode", modes[:3] + ["Ultra Quality"])]:
+        add(G, up, f"CUSTOM_QUALITY.{key}", label, "choice",
+            "The game keeps this value while the upscaler is not in use. The mode names are inferred from the "
+            "NVIDIA DLSS order.", choices={str(i): n for i, n in enumerate(names)})
     add(G, "Texture streaming", "CUSTOM_QUALITY.TextureStreaming", "Texture streaming", "number")
     add(G, "Texture streaming", "CUSTOM_QUALITY.TextureVRAMLimit", "Texture VRAM limit", "number")
 
@@ -756,6 +749,11 @@ def bind_tree(widget, sequence, callback):
         tk.Misc.bind(w, sequence, callback, "+")
 
 
+def tk_font(widget, font):
+    s = ctk.ScalingTracker.get_widget_scaling(widget)
+    return font.cget("family"), -round(abs(font.cget("size")) * s), font.cget("weight")
+
+
 def scroll_ancestor(widget, event):
     w = widget
     while w is not None and not isinstance(w, ctk.CTkScrollableFrame):
@@ -875,11 +873,7 @@ class ChoiceControl(Control):
 
 class DataCenterControl(ChoiceControl):
     def choices(self):
-        out = {}
-        for v in self.app.datacenters:
-            ms = self.app.pings.get(v)
-            out[v] = region_label(v) + (f"   ·   {ms:.0f} ms" if ms is not None else "")
-        return out
+        return {v: region_label(v) for v in self.app.datacenters}
 
     def load(self):
         self.options = dict(self.choices())
@@ -913,7 +907,7 @@ class RangeControl(Control):
     def __init__(self, row, app, spec):
         super().__init__(row, app, spec)
         v = num(self.value)
-        self.lo, self.hi = self.bounds(v)
+        self.lo, self.hi = self.bounds(None if v is None else spec.offset + spec.scale * v)
         orig = app.orig.get((spec.sec, spec.key)) or self.value or ""
         self.float_style = "." in orig or (spec.digits > 0 and not orig)
         self.shown = ""
@@ -969,6 +963,7 @@ class RangeControl(Control):
         return round(self.lo + round((v - self.lo) / step) * step, 6)
 
     def to_file(self, v):
+        v = (v - self.spec.offset) / self.spec.scale
         return f"{v:.6f}" if self.float_style else str(int(round(v)))
 
     def show(self, v):
@@ -978,7 +973,7 @@ class RangeControl(Control):
 
     def current(self):
         v = num(self.value)
-        return self.lo if v is None else v
+        return self.lo if v is None else self.spec.offset + self.spec.scale * v
 
     def _slide(self, v):
         v = self.clamp(self.snap(v))
@@ -998,7 +993,7 @@ class RangeControl(Control):
         if v is None:
             self.load()
             return
-        v = self.clamp(v)
+        v = self.clamp(self.snap(v) if self.spec.scale != 1 else v)
         self.set_shown(v)
         self.emit(self.to_file(v))
 
@@ -1026,9 +1021,6 @@ class NumberControl(RangeControl):
 
     def snap(self, v):
         return round(v, 6)
-
-    def to_file(self, v):
-        return f"{v:.6f}" if self.float_style else str(int(round(v)))
 
 
 class LimitControl(RangeControl):
@@ -1199,44 +1191,71 @@ class Pill(ctk.CTkLabel):
 
 
 class SettingRow(Hover, ctk.CTkFrame):
+    # Text and spacers are plain Tk widgets: a page holds hundreds of rows, and each customtkinter widget adds a
+    # canvas and extra windows that Windows has to paint whenever the page is shown.
     def __init__(self, master, app, spec):
         super().__init__(master, fg_color=COL["card"], corner_radius=8)
-        self.app, self.spec = app, spec
+        self.app, self.spec, self.bg, self.plain, self.dirty = app, spec, COL["card"], [], False
         self.keys = [(spec.sec, spec.key)] + ([(spec.sec, "ResolutionHeight")] if spec.kind == "resolution" else [])
+        s = ctk.ScalingTracker.get_widget_scaling(self)
+        px = lambda v: round(v * s)
+        font = lambda f: tk_font(self, f)
+
+        def plain(cls, parent, **kw):
+            w = cls(parent, bg=self.bg, **kw)
+            self.plain.append(w)
+            return w
+
         self.grid_columnconfigure(1, weight=1)
-        self.bar = ctk.CTkFrame(self, width=4, height=30, corner_radius=2, fg_color="transparent")
-        self.bar.grid(row=0, column=0, sticky="ns", padx=(4, 0), pady=8)
-        text = ctk.CTkFrame(self, fg_color="transparent")
-        text.grid(row=0, column=1, sticky="w", padx=(10, 12), pady=6)
-        title = ctk.CTkFrame(text, fg_color="transparent")
+        self.grid_columnconfigure(3, minsize=px(40))
+        self.bar = plain(tk.Frame, self, width=px(4))
+        self.bar.grid(row=0, column=0, sticky="ns", padx=(px(4), 0), pady=px(8))
+        text = plain(tk.Frame, self)
+        text.grid(row=0, column=1, sticky="w", padx=(px(10), px(12)), pady=px(7))
+        title = plain(tk.Frame, text)
         title.pack(anchor="w")
-        ctk.CTkLabel(title, text=spec.label, font=app.f.body, text_color=COL["text"], anchor="w", height=22).pack(side="left")
-        ctk.CTkLabel(title, text=spec.key, font=app.f.tiny_mono, text_color=COL["faint"], height=22).pack(side="left", padx=(10, 0))
+        plain(tk.Label, title, text=spec.label, font=font(app.f.body), fg=COL["text"]).pack(side="left")
+        key = plain(tk.Label, title if len(spec.label) + len(spec.key) <= 44 else text, text=spec.key,
+                    font=font(app.f.tiny_mono), fg=COL["faint"])
+        key.pack(side="left", padx=(px(8), 0)) if key.master is title else key.pack(anchor="w")
         if spec.ini_only:
-            Pill(title, "NOT IN GAME MENU", COL["accent_dim"], COL["accent"], app.f.tiny).pack(side="left", padx=(8, 0))
+            self.pill = Pill(title, "NOT IN GAME MENU", COL["accent_dim"], COL["accent"], app.f.tiny)
+            self.pill.pack(side="left", padx=(8, 0))
         help_text = spec.help or ("" if spec.choices else app.hint(spec))
         if help_text:
-            ctk.CTkLabel(text, text=help_text, font=app.f.small, text_color=COL["muted"], anchor="w", justify="left",
-                         wraplength=330, height=16).pack(anchor="w")
+            plain(tk.Label, text, text=help_text, font=font(app.f.small), fg=COL["muted"], justify="left",
+                  wraplength=px(330)).pack(anchor="w")
         self.control = make_control(self, app, spec)
         self.control.grid(row=0, column=2, sticky="e", padx=4, pady=6)
-        self.reset = ctk.CTkButton(self, text="", width=30, height=30, corner_radius=8, fg_color="transparent",
+        self.reset = ctk.CTkButton(self, text="↺", width=30, height=30, corner_radius=8, fg_color="transparent",
                                    hover_color=COL["line"], text_color=COL["accent"], font=app.f.body,
                                    command=lambda: app.reset_keys(self.keys))
-        self.reset.grid(row=0, column=3, padx=(2, 8))
         self.hover_bind(COL["card"], COL["card_hi"])
         bind_tree(self, "<Button-3>", self._menu)
         for k in self.keys:
             app.rows[k].append(self)
         self.mark()
 
+    def configure(self, **kw):
+        if "fg_color" in kw:
+            self.bg = kw["fg_color"]
+            for w in getattr(self, "plain", ()):
+                if w is not self.bar or not self.dirty:
+                    w.configure(bg=self.bg)
+            if getattr(self, "pill", None):
+                self.pill.configure(bg_color=self.bg)
+        super().configure(**kw)
+
     def load(self):
         self.control.load()
 
     def mark(self):
-        dirty = any(k in self.app.pending for k in self.keys)
-        self.bar.configure(fg_color=COL["accent"] if dirty else "transparent")
-        self.reset.configure(text="↺" if dirty else "", state="normal" if dirty else "disabled")
+        self.dirty = any(k in self.app.pending for k in self.keys)
+        self.bar.configure(bg=COL["accent"] if self.dirty else self.bg)
+        if self.dirty:
+            self.reset.grid(row=0, column=3, padx=(2, 8))
+        else:
+            self.reset.grid_remove()
 
     def _menu(self, event):
         self.app.row_menu(self, event)
@@ -1428,6 +1447,54 @@ class BarChart(tk.Canvas):
             self.on_pick(i)
 
 
+@contextmanager
+def frozen(widget):
+    # Pauses painting of the widget's window while pages are swapped, then paints the result in one pass.
+    hwnd = widget.winfo_id() if sys.platform == "win32" and widget.winfo_viewable() else None
+    if hwnd:
+        _send_message(hwnd, 0x000B, 0, 0)
+    try:
+        yield
+    finally:
+        widget.update_idletasks()
+        if hwnd:
+            _send_message(hwnd, 0x000B, 1, 0)
+            _redraw_window(hwnd, None, None, 0x0001 | 0x0004 | 0x0080 | 0x0100)
+            widget.update_idletasks()
+
+
+class Tabs(ctk.CTkFrame):
+    def __init__(self, master, names, command, font):
+        super().__init__(master, fg_color="transparent")
+        self.command, self.current = command, names[0]
+        self.bar = ctk.CTkSegmentedButton(self, values=list(names), command=self.set, font=font, height=34,
+                                          fg_color=COL["bg"], selected_color=COL["accent_deep"],
+                                          selected_hover_color=COL["accent"], unselected_color=COL["bg"],
+                                          unselected_hover_color=COL["card_hi"], text_color=COL["text"])
+        self.bar.pack(anchor="w", pady=(0, 8))
+        body = ctk.CTkFrame(self, fg_color=COL["panel"], corner_radius=12)
+        body.pack(fill="both", expand=True)
+        self.inner = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
+        self.inner.pack(fill="both", expand=True, padx=12, pady=12)
+        self.pages = {n: ctk.CTkFrame(self.inner, fg_color=COL["panel"], corner_radius=0) for n in names}
+
+    def tab(self, name):
+        return self.pages[name]
+
+    def get(self):
+        return self.current
+
+    def set(self, name):
+        old, self.current = self.current, name
+        self.bar.set(name)
+        with frozen(self.inner):
+            if self.command:
+                self.command()
+            if old != name:
+                self.pages[old].place_forget()
+            self.pages[name].place(x=0, y=0, relwidth=1, relheight=1)
+
+
 class App(ctk.CTk):
     TABS = ("Settings", "Profile", "Transfer", "Backups", "Benchmarks")
 
@@ -1437,7 +1504,7 @@ class App(ctk.CTk):
         self.store = Store(APP_DIR)
         cfg = self.store.data["settings"]
         self.root_dir = Path(root or cfg.get("root") or DEFAULT_ROOT)
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} {__version__}")
         self.geometry(cfg.get("geometry") or "1380x880")
         self.minsize(1150, 720)
         F = ctk.CTkFont
@@ -1451,7 +1518,7 @@ class App(ctk.CTk):
         self.rows = defaultdict(list)
         self.layout, self.cat_frames, self.nav_items = {}, {}, {}
         self.cat, self.search_frame = None, None
-        self.hints, self.datacenters, self._auto, self.pings, self.watchers = {}, [], {}, {}, []
+        self.hints, self.datacenters, self._auto, self.watchers = {}, [], {}, []
         self.modes = display_modes()
         self.running, self.file_mtime, self._last_poll = False, None, 0.0
         self._jobs, self._toast, self._poll_q, self._polling = {}, None, queue.Queue(), False
@@ -1461,8 +1528,8 @@ class App(ctk.CTk):
         self.write_buttons = []
         self.build()
         self.rescan(select=cfg.get("last_profile"))
+        self.tabs.command = self.on_tab
         self.tabs.set(cfg.get("last_tab") if cfg.get("last_tab") in self.TABS else "Settings")
-        self.on_tab()
         self.after(400, self.poll)
         self.bind_all("<Control-s>", lambda e: self.save())
         self.bind_all("<Control-z>", lambda e: self.undo())
@@ -1511,15 +1578,8 @@ class App(ctk.CTk):
         self.h_game = ctk.CTkLabel(header, text="", corner_radius=8, height=28, font=self.f.small)
         self.h_game.pack(side="right", padx=16)
 
-        self.tabs = ctk.CTkTabview(main, fg_color=COL["panel"], corner_radius=12, anchor="w", command=self.on_tab,
-                                   segmented_button_fg_color=COL["bg"], segmented_button_selected_color=COL["accent_deep"],
-                                   segmented_button_selected_hover_color=COL["accent"],
-                                   segmented_button_unselected_color=COL["bg"],
-                                   segmented_button_unselected_hover_color=COL["card_hi"],
-                                   segmented_button_font=self.f.bold, text_color=COL["text"])
-        self.tabs.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        for name in self.TABS:
-            self.tabs.add(name)
+        self.tabs = Tabs(main, self.TABS, None, self.f.bold)
+        self.tabs.pack(fill="both", expand=True, padx=14, pady=(4, 14))
         self.t = {name: self.tabs.tab(name) for name in self.TABS}
         self.build_settings_tab()
         self.build_transfer_tab()
@@ -1653,12 +1713,13 @@ class App(ctk.CTk):
         self.file_mtime = profile.mtime
         self.store.data["settings"]["last_profile"] = profile.uuid
         self.compute_layout()
-        self.reset_settings_view()
-        self.update_header()
-        self.render_sidebar()
-        self.update_dirty()
-        self.stale = {"Profile", "Transfer", "Backups"}
-        self.on_tab()
+        with frozen(self.tabs.inner):
+            self.reset_settings_view()
+            self.update_header()
+            self.render_sidebar()
+            self.update_dirty()
+            self.stale = {"Profile", "Transfer", "Backups"}
+            self.on_tab()
 
     def reload_current(self):
         if self.current:
@@ -1837,8 +1898,6 @@ class App(ctk.CTk):
                     self.scope_panel(card, "ADSMouseSensitivity")
                 elif (cat, group) == ("Controller", "Aim down sights"):
                     self.scope_panel(card, "ADSGamepadSensitivity")
-                elif (cat, group) == ("Network", "Matchmaking"):
-                    self.ping_panel(card)
             for spec in specs:
                 SettingRow(card, self, spec).pack(fill="x", padx=6, pady=2)
             ctk.CTkFrame(card, height=4, fg_color="transparent").pack()
@@ -1849,45 +1908,49 @@ class App(ctk.CTk):
         return frame
 
     def show_category(self, cat):
-        if self.search_frame:
-            self.search_frame.destroy()
-            self.search_frame = None
-            self.s_search.delete(0, "end")
-        self.cat = cat
-        for c, item in self.nav_items.items():
-            item.set_active(c == cat)
-        for f in self.cat_frames.values():
-            f.pack_forget()
-        if cat not in self.cat_frames:
-            self.cat_frames[cat] = self.build_category(cat)
-        self.cat_frames[cat].pack(fill="both", expand=True)
+        with frozen(self.s_holder):
+            if self.search_frame:
+                self.search_frame.destroy()
+                self.search_frame = None
+                self.s_search.delete(0, "end")
+            self.cat = cat
+            for c, item in self.nav_items.items():
+                item.set_active(c == cat)
+            for f in self.cat_frames.values():
+                f.pack_forget()
+            if cat not in self.cat_frames:
+                self.cat_frames[cat] = self.build_category(cat)
+            self.cat_frames[cat].pack(fill="both", expand=True)
 
     def run_search(self):
         q = self.s_search.get().strip().lower()
-        if self.search_frame:
-            self.search_frame.destroy()
-            self.search_frame = None
         if not q:
+            if self.search_frame:
+                self.search_frame.destroy()
+                self.search_frame = None
             if self.cat in self.layout:
                 self.show_category(self.cat)
             return
-        for f in self.cat_frames.values():
-            f.pack_forget()
-        for item in self.nav_items.values():
-            item.set_active(False)
-        groups = []
-        for cat, cat_groups in self.layout.items():
-            for group, specs in cat_groups.items():
-                hits = [s for s in specs if q in f"{s.label} {s.key} {s.help} {group} {cat}".lower()]
-                if hits:
-                    groups.append((f"{cat}  ·  {group}", hits))
-        frame = ctk.CTkScrollableFrame(self.s_holder, fg_color="transparent")
-        if groups:
-            self.build_rows(frame, groups, search=True)
-        else:
-            ctk.CTkLabel(frame, text=f'No setting matches "{q}".', text_color=COL["muted"], font=self.f.body).pack(pady=40)
-        frame.pack(fill="both", expand=True)
-        self.search_frame = frame
+        with frozen(self.s_holder):
+            if self.search_frame:
+                self.search_frame.destroy()
+            for item in self.nav_items.values():
+                item.set_active(False)
+            for f in self.cat_frames.values():
+                f.pack_forget()
+            groups = []
+            for cat, cat_groups in self.layout.items():
+                for group, specs in cat_groups.items():
+                    hits = [s for s in specs if q in f"{s.label} {s.key} {s.help} {group} {cat}".lower()]
+                    if hits:
+                        groups.append((f"{cat}  ·  {group}", hits))
+            frame = ctk.CTkScrollableFrame(self.s_holder, fg_color="transparent")
+            if groups:
+                self.build_rows(frame, groups, search=True)
+            else:
+                ctk.CTkLabel(frame, text=f'No setting matches "{q}".', text_color=COL["muted"], font=self.f.body).pack(pady=40)
+            frame.pack(fill="both", expand=True)
+            self.search_frame = frame
 
     def tool_box(self, card, title):
         box = ctk.CTkFrame(card, fg_color=COL["bg"], corner_radius=10)
@@ -2001,61 +2064,6 @@ class App(ctk.CTk):
                       command=lambda: set_all(self.value("INPUT", f"{prefix}1x"))).pack(side="left", padx=8)
         ctk.CTkButton(line, text="Match hipfire (50)", width=140, height=30, command=lambda: set_all(50)).pack(side="left")
 
-    def ping_panel(self, card):
-        if ("ONLINE", "DataCenterHint") not in self.orig:
-            return
-        box = self.tool_box(card, "Server ping")
-        line = ctk.CTkFrame(box, fg_color="transparent")
-        line.pack(fill="x", padx=14, pady=(2, 4))
-        btn = ctk.CTkButton(line, text="Measure ping", width=130, height=30)
-        btn.pack(side="left")
-        best_btn = ctk.CTkButton(line, text="Use the fastest", width=130, height=30, state="disabled")
-        best_btn.pack(side="left", padx=8)
-        out = ctk.CTkLabel(box, text="", font=self.f.mono, text_color=COL["text"], justify="left", anchor="w")
-        out.pack(fill="x", padx=14)
-        ctk.CTkLabel(box, text="Sends a few small UDP packets to the AWS GameLift ping beacon of each region. "
-                               "This is the provider's latency check, not the game's own. playfab/uaenorth has no public beacon.",
-                     font=self.f.small, text_color=COL["faint"], wraplength=720, justify="left", anchor="w").pack(fill="x", padx=14, pady=(4, 10))
-        results = queue.Queue()
-
-        def show():
-            if not out.winfo_exists():
-                return
-            ranked = sorted((ms, dc) for dc, ms in self.pings.items() if ms is not None)
-            if ranked:
-                lines = [f"{ms:6.0f} ms   {region_label(dc)}" for ms, dc in ranked[:5]]
-                out.configure(text="\n".join(lines), height=18 * len(lines))
-                best_btn.configure(state="normal", command=lambda: self.set_value("ONLINE", "DataCenterHint", ranked[0][1]))
-            elif self.pings:
-                out.configure(text="No beacon answered. A firewall may block outgoing UDP.")
-            for row in self.live_rows(("ONLINE", "DataCenterHint")):
-                row.load()
-
-        def run():
-            btn.configure(state="disabled", text="Measuring...")
-            regions = [dc for dc in self.datacenters if dc.startswith("gamelift/")]
-
-            def work():
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    results.put(dict(zip(regions, pool.map(lambda dc: ping_region(dc.split("/", 1)[1]), regions))))
-
-            threading.Thread(target=work, daemon=True).start()
-            wait()
-
-        def wait():
-            try:
-                self.pings = results.get_nowait()
-            except queue.Empty:
-                if btn.winfo_exists():
-                    self.after(200, wait)
-                return
-            if btn.winfo_exists():
-                btn.configure(state="normal", text="Measure again")
-                show()
-
-        btn.configure(command=run)
-        show()
-
     def set_value(self, sec, key, value, src=None, record=True):
         k = (sec, key)
         before = self.value(sec, key)
@@ -2115,7 +2123,7 @@ class App(ctk.CTk):
         counts = Counter(self.spec(*k).cat for k in self.pending if self.spec(*k).kind != "hidden")
         for cat, item in self.nav_items.items():
             item.set_count(counts.get(cat, 0))
-        self.title(f"{APP_NAME}{'  (unsaved changes)' if n else ''}")
+        self.title(f"{APP_NAME} {__version__}{'  (unsaved changes)' if n else ''}")
 
     def save(self):
         if not self.pending or not self.current:
@@ -2277,8 +2285,8 @@ class App(ctk.CTk):
                 self.build_profile_tab()
 
         entry.bind("<Return>", lambda e: add_tag(entry.get()))
-        suggestions = [tg for tg in self.store.all_tags() + ["main", "smurf", "ranked", "practice", "controller",
-                                                             "stretched", "streaming"] if tg not in meta["tags"]]
+        suggestions = [tg for tg in self.store.all_tags() + ["main", "smurf", "stretched", "stream"]
+                       if tg not in meta["tags"]]
         if suggestions:
             sug = ctk.CTkFrame(tagbox, fg_color="transparent")
             sug.pack(fill="x")
@@ -2424,7 +2432,7 @@ class App(ctk.CTk):
         return self.x_extra[label]
 
     def start_transfer(self, src_ref, target_uuid=None):
-        self.tabs.set("Transfer")
+        self.stale.discard("Transfer")
         label = next((k for k, v in self.source_options().items() if v == src_ref), None)
         self.refresh_transfer()
         if label:
@@ -2434,6 +2442,7 @@ class App(ctk.CTk):
         if tl:
             self.x_tgt.set(tl)
         self.refresh_transfer(rebuild_menus=False, clear=True)
+        self.tabs.set("Transfer")
 
     def pick_source(self, label):
         ref = self.source_options().get(label)
@@ -2465,6 +2474,10 @@ class App(ctk.CTk):
         return IniFile.load(ident).values()
 
     def refresh_transfer(self, rebuild_menus=True, clear=False):
+        with frozen(self.t["Transfer"]):
+            self._refresh_transfer(rebuild_menus, clear)
+
+    def _refresh_transfer(self, rebuild_menus, clear):
         if rebuild_menus:
             src_opts, tgt_opts = list(self.source_options()), list(self.target_options())
             self.x_src.configure(values=src_opts)
@@ -2530,6 +2543,10 @@ class App(ctk.CTk):
             card = ctk.CTkFrame(self.x_table, fg_color=COL["card"], corner_radius=12)
             card.pack(fill="x", padx=(2, 10))
             card.grid_columnconfigure(1, weight=1)
+            sc = ctk.ScalingTracker.get_widget_scaling(card)
+            card.grid_columnconfigure(2, minsize=round(200 * sc))
+            card.grid_columnconfigure(4, minsize=round(200 * sc))
+            label_kw = dict(bg=COL["card"], font=tk_font(card, self.f.mono))
             for i, (spec, k, sv, tv) in enumerate(rows):
                 var = tk.IntVar(value=int(k in self.x_sel))
                 self.x_vars[k] = var
@@ -2537,16 +2554,18 @@ class App(ctk.CTk):
                 label = "Resolution width" if spec.kind == "resolution" else spec.label
                 ctk.CTkCheckBox(card, text="", variable=var, width=24, checkbox_width=20, checkbox_height=20,
                                 command=lambda k=k, var=var: self.toggle_row(k, var.get())).grid(row=i, column=0, padx=(14, 4), pady=4)
-                name = ctk.CTkFrame(card, fg_color="transparent")
-                name.grid(row=i, column=1, sticky="w")
-                ctk.CTkLabel(name, text=label, font=self.f.body, anchor="w", height=20).pack(anchor="w")
-                ctk.CTkLabel(name, text=spec.path, font=self.f.tiny_mono, text_color=COL["faint"], anchor="w", height=14).pack(anchor="w")
+                name = tk.Frame(card, bg=COL["card"])
+                name.grid(row=i, column=1, sticky="w", pady=round(3 * sc))
+                tk.Label(name, text=label, bg=COL["card"], fg=COL["text"], font=tk_font(card, self.f.body)).pack(anchor="w")
+                tk.Label(name, text=spec.path, bg=COL["card"], fg=COL["faint"], font=tk_font(card, self.f.tiny_mono)).pack(anchor="w")
                 same = sv == tv
-                ctk.CTkLabel(card, text=spec.show(sv), font=self.f.mono, width=200, anchor="e",
-                             text_color=COL["muted"] if same else COL["accent"]).grid(row=i, column=2, padx=6)
-                ctk.CTkLabel(card, text="→", font=self.f.body, text_color=COL["faint"]).grid(row=i, column=3, padx=6)
-                ctk.CTkLabel(card, text=spec.show(tv) if tv is not None else "new key", font=self.f.mono, width=200, anchor="w",
-                             text_color=COL["muted"] if tv is not None else COL["ok"]).grid(row=i, column=4, padx=(6, 14))
+                tk.Label(card, text=spec.show(sv), fg=COL["muted"] if same else COL["accent"], **label_kw).grid(
+                    row=i, column=2, sticky="e", padx=round(6 * sc))
+                tk.Label(card, text="→", bg=COL["card"], fg=COL["faint"], font=tk_font(card, self.f.body)).grid(
+                    row=i, column=3, padx=round(6 * sc))
+                tk.Label(card, text=spec.show(tv) if tv is not None else "new key",
+                         fg=COL["muted"] if tv is not None else COL["ok"], **label_kw).grid(
+                    row=i, column=4, sticky="w", padx=(round(6 * sc), round(14 * sc)))
         hidden = "" if include_hw else "  Hardware keys are hidden."
         self.x_summary = f"{total_diff} difference{'s' if total_diff != 1 else ''}.{hidden}"
         self.update_transfer_count()

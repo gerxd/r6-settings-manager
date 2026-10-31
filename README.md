@@ -1,46 +1,53 @@
 # R6 Siege Settings Manager
 
-A desktop app for Windows that reads, edits and copies Rainbow Six Siege settings files.
+A Windows desktop app for Rainbow Six Siege settings files. Siege keeps one `GameSettings.ini` per Ubisoft profile in `Documents\My Games\Rainbow Six - Siege\<profile ID>\`. The app shows every profile in one place, gives each one a label, and lets you edit, compare and copy settings between them.
 
-Siege keeps one `GameSettings.ini` per Ubisoft profile in `Documents\My Games\Rainbow Six - Siege\<profile ID>\`. The app lists every profile folder, lets you label and tag each one, and shows the settings with a control that fits each value.
-
-## Features
-
-- Settings grouped by category, with sliders, switches and segmented buttons. Search works across all categories.
-- A button that opens a profile ID on R6 Tracker or stats.cc in your browser, so you can find the account name and use it as the label.
-- Keys that have no control in the game menu, such as the sensitivity multipliers and the server region, are marked.
-- A sensitivity calculator with effective sensitivity, cm/360 from your DPI, and a way to change the multiplier while keeping the same feel.
-- An ADS helper that sets every scope at once.
-- A ping test for the server regions, using the AWS GameLift ping beacons.
-- Copy or merge settings between profiles, backups and presets. Each key has its own checkbox. Hardware-bound keys stay unchecked by default.
-- Right-click any setting to copy that value to other profiles.
-- A backup before every write, with compare and restore.
-- A read-only lock, so the game cannot overwrite the file.
-- A benchmark viewer for the game's built-in benchmark reports.
-- No writes while the game runs, because Siege rewrites the file when it exits.
-
-## Run
-
-You need [uv](https://docs.astral.sh/uv/).
+Download the exe from [Releases](https://github.com/gerxd/r6-settings-manager/releases), or run the script with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv run r6_siege_settings_manager.py
 ```
 
-To point the app at another settings folder, use `--root <folder>`.
+## Settings
 
-## Build the exe
+Settings are grouped like the game menu, with a control for each kind of value. Values that the game stores as an index, such as render scaling and sharpness, are shown in the game's own units.
+
+![Graphics settings](docs/settings.png)
+
+Keys that the game menu does not offer, such as the sensitivity multiplier, are marked. The Mouse page has a sensitivity calculator that shows cm/360 for your DPI and can change the multiplier without changing your feel.
+
+![Mouse settings](docs/mouse.png)
+
+## Profiles and transfer
+
+Give each profile ID a label, a color and tags. To find out which account a profile ID belongs to, open it on R6 Tracker or stats.cc.
+
+![Profile page](docs/profile.png)
+
+Copy settings from another profile, a preset, a backup or an `.ini` file. You pick each key. Hardware keys are hidden by default.
+
+![Transfer page](docs/transfer.png)
+
+## Benchmarks
+
+The Benchmarks tab reads the reports of the game's built-in benchmark, with frame rate, CPU and GPU frame times, and a comparison between runs.
+
+![Benchmarks page](docs/benchmarks.png)
+
+## Safety
+
+- The app backs up the file before every save, and you can restore any backup.
+- A read-only lock stops the game from overwriting the file.
+- Saving is blocked while Siege runs, because the game rewrites the file when it exits.
+
+Labels, presets and backups are stored in `%APPDATA%\R6SiegeSettingsManager`.
+
+## Notes
+
+Ubisoft does not document the value encodings. Aspect ratio, render scaling and sharpness are checked against the game menu. The order of the DLSS and FSR options is inferred, and the app says so where it applies.
+
+To build the exe:
 
 ```bash
 uv run --no-project --with pyinstaller --with customtkinter --with numpy pyinstaller --noconfirm --onefile --windowed --name "R6 Siege Settings Manager" --collect-data customtkinter r6_siege_settings_manager.py
 ```
-
-The exe is written to `dist\`.
-
-## Data
-
-Labels, tags, presets and backups are stored in `%APPDATA%\R6SiegeSettingsManager`. To use another folder, set the `R6SM_DATA` environment variable.
-
-## Limits
-
-Ubisoft does not document most value encodings. The graphics labels come from the in-game menu order and community files. The cm/360 math uses a community-measured constant. Notes in the app mark these cases.
