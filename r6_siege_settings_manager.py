@@ -30,7 +30,7 @@ import customtkinter as ctk
 import numpy as np
 
 APP_NAME = "R6 Siege Settings Manager"
-__version__ = "0.2"
+__version__ = "0.2.1"
 SETTINGS_FILE = "GameSettings.ini"
 MAX_BACKUPS = 50
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -354,7 +354,7 @@ def _schema():
     add(G, "Quality", "CUSTOM_QUALITY.Atmospheric", "Atmospheric", "number", "Custom files hold -1. Meaning not documented.")
     up = "Upscaling"
     add(G, up, "CUSTOM_QUALITY.Upscaler", "Upscaling technique", "choice",
-        "Off and Temporal are confirmed. The order of DLSS and the two FSR versions is inferred.",
+        "Temporal is confirmed. The numbers of Off, DLSS and the two FSR versions are inferred.",
         choices={"0": "Off", "1": "Temporal", "2": "NVIDIA DLSS", "3": "AMD FSR 1.0", "4": "AMD FSR 2.0"})
     add(G, up, "CUSTOM_QUALITY.TemporalUpscalerMode", "Upscaling mode", "choice",
         choices={"0": "Fixed render scaling", "1": "Adaptive render scaling"})
@@ -364,14 +364,15 @@ def _schema():
         "Used in adaptive mode. The range is read from the menu slider and may be slightly off.",
         lo=30, hi=330, step=5, scale=5, offset=5, unit=" fps")
     add(G, up, "CUSTOM_QUALITY.AntiAliasing", "Anti-aliasing mode", "choice",
-        "T-AA is confirmed. FXAA and Off are inferred.", choices={"0": "T-AA", "1": "FXAA", "2": "Off"})
+        "Listed in menu order. Off and FXAA are not available with Temporal upscaling.",
+        choices={str(i): n for i, n in enumerate(["T-AA", "Off", "FXAA", "T-AA-2x", "T-AA-4x"])})
     add(G, up, "CUSTOM_QUALITY.Sharpness", "Anti-aliasing sharpness", "range", lo=0, hi=100, step=5, scale=5)
-    modes = ["Performance", "Balanced", "Quality", "Ultra Performance"]
-    for key, label, names in [("DLSSPerfQual", "DLSS mode", modes), ("FSR2PerfQual", "FSR 2.0 mode", modes),
-                              ("FSRPerfQual", "FSR 1.0 mode", modes[:3] + ["Ultra Quality"])]:
-        add(G, up, f"CUSTOM_QUALITY.{key}", label, "choice",
-            "The game keeps this value while the upscaler is not in use. The mode names are inferred from the "
-            "NVIDIA DLSS order.", choices={str(i): n for i, n in enumerate(names)})
+    modes = ["Auto", "Quality", "Balanced", "Performance", "Ultra Performance"]
+    for key, label, note in [("DLSSPerfQual", "DLSS mode", "Listed in menu order."),
+                             ("FSR2PerfQual", "FSR 2.0 mode", "Assumed to follow the DLSS list."),
+                             ("FSRPerfQual", "FSR 1.0 mode", "Assumed to follow the DLSS list.")]:
+        add(G, up, f"CUSTOM_QUALITY.{key}", label, "choice", f"Used when this upscaler is selected. {note}",
+            choices={str(i): n for i, n in enumerate(modes)})
     add(G, "Texture streaming", "CUSTOM_QUALITY.TextureStreaming", "Texture streaming", "number")
     add(G, "Texture streaming", "CUSTOM_QUALITY.TextureVRAMLimit", "Texture VRAM limit", "number")
 

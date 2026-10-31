@@ -44,10 +44,14 @@ Labels, presets and backups are stored in `%APPDATA%\R6SiegeSettingsManager`.
 
 ## Notes
 
-Ubisoft does not document the value encodings. Aspect ratio, render scaling and sharpness are checked against the game menu. The order of the DLSS and FSR options is inferred, and the app says so where it applies.
+Ubisoft does not document the value encodings. Most lists and scales are checked against the game menu. The upscaler numbers for DLSS and FSR, and the FSR mode lists, are inferred, and the app says so where it applies.
 
 To build the exe:
 
 ```bash
 uv run --no-project --with pyinstaller --with customtkinter --with numpy pyinstaller --noconfirm --onefile --windowed --name "R6 Siege Settings Manager" --collect-data customtkinter r6_siege_settings_manager.py
 ```
+
+## License
+
+MIT. This project is not affiliated with Ubisoft. Rainbow Six Siege is a trademark of Ubisoft Entertainment.
