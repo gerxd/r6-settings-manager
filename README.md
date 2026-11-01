@@ -10,7 +10,7 @@ uv run r6_siege_settings_manager.py
 
 ## Settings
 
-Settings are grouped like the game menu, with a control for each kind of value. Values that the game stores as an index, such as render scaling and sharpness, are shown in the game's own units.
+Settings are grouped like the game menu, with a control for each kind of value. Values that the game stores as an index, such as render scaling and sharpness, are shown in the game's own units. Search accepts the words players use, such as "fullscreen" or "fps cap", and Ctrl+Z undoes each change, including a whole resolution pick or Revert all.
 
 ![Graphics settings](docs/settings.png)
 
@@ -24,19 +24,20 @@ Give each profile ID a label, a color and tags. To find out which account a prof
 
 ![Profile page](docs/profile.png)
 
-Copy settings from another profile, a preset, a backup or an `.ini` file. You pick each key. Hardware keys are hidden by default.
+Copy settings from another profile, a preset, a backup or an `.ini` file to one profile or to all other profiles. You pick each key. Hardware keys are hidden by default.
 
 ![Transfer page](docs/transfer.png)
 
 ## Benchmarks
 
-The Benchmarks tab reads the reports of the game's built-in benchmark, with frame rate, CPU and GPU frame times, and a comparison between runs.
+The Benchmarks tab reads the reports of the game's built-in benchmark, with frame rate and CPU and GPU frame times. Each run is compared with the previous one, with the difference in every figure and in the recorded settings. New runs appear while the app is open.
 
 ![Benchmarks page](docs/benchmarks.png)
 
 ## Safety
 
-- The app backs up the file before every save, and you can restore any backup.
+- Backups hold every version the app saves, and the file as it was before the game or another program changed it. You can restore any backup, and named backups are kept until you delete them.
+- If the game rewrites the file while you have unsaved edits, the edits are kept and the app names any setting that both changed.
 - A read-only lock stops the game from overwriting the file.
 - Saving is blocked while Siege runs, because the game rewrites the file when it exits.
 

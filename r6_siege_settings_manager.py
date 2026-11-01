@@ -17,8 +17,9 @@ import threading
 import time
 import webbrowser
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from string import Template
 from types import SimpleNamespace
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox, QDialog
                                QStyledItemDelegate, QStyleOptionSlider, QVBoxLayout, QWidget)
 
 APP_NAME = "R6 Siege Settings Manager"
-__version__ = "0.3"
+__version__ = "0.4"
 SETTINGS_FILE = "GameSettings.ini"
 MAX_BACKUPS = 50
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -124,6 +125,10 @@ def num(value):
 
 def nice_date(d):
     return f"{d.day} {d:%b %Y}, {d.hour}:{d:%M}"
+
+
+def plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def aspect_name(w, h):
@@ -290,11 +295,17 @@ def region_label(value):
 SCOPES = ("1x", "1xHalf", "2x", "2xHalf", "3x", "4x", "5x", "8x", "12x")
 SCOPE_LABELS = {s: {"1xHalf": "1.5x", "2xHalf": "2.5x"}.get(s, s) for s in SCOPES}
 GROUP_NOTES = {
-    ("Graphics", "Quality"): "Labels follow the in-game menu order. The index mapping comes from community files, "
-                             "not from Ubisoft.",
+    ("Graphics", "Quality"): "Labels follow the in-game menu order. Which number stands for which level comes from "
+                             "community files, not from Ubisoft.",
     ("Mouse", "Aim down sights"): "At 50, every sight matches hipfire by monitor distance.",
 }
 DEG_PER_COUNT = 0.00572957795
+SENS_KEYS = (("INPUT", "MouseYawSensitivity"), ("INPUT", "MousePitchSensitivity"),
+             ("INPUT", "MouseSensitivityMultiplierUnit"))
+SYNONYMS = {"gamma": ["brightness"], "cap": ["fps limit"], "scale": ["scaling"], "stretched": ["resolution", "aspect ratio"],
+            "ptt": ["push to talk"], "fullscreen": ["display mode"], "borderless": ["display mode"],
+            "windowed": ["display mode"], "sens": ["sensitivity"]}
+CALCULATOR_TEXT = ["Sensitivity calculator", "DPI eDPI cm/360", "Mouse", "Hipfire"]
 
 CATEGORIES = ["Display", "Graphics", "Mouse", "Controller", "Controls", "Audio", "Voice chat",
               "Accessibility", "Network", "System", "Other"]
@@ -317,7 +328,7 @@ def _schema():
     add(D, "Screen", "DISPLAY_SETTINGS.RefreshRate", "Refresh rate", "refresh", "Auto lets DirectX pick the rate.",
         unit=" Hz", digits=3)
     add(D, "Screen", "DISPLAY_SETTINGS.AspectRatio", "Aspect ratio", "choice",
-        "Display (0) comes from the file's own comment and is not in the game menu.",
+        "Display (value 0) comes from a comment in the file. The game menu does not offer it.",
         choices={str(i): r for i, r in enumerate(["Display", "Resolution", "5:4", "4:3", "3:2", "16:10", "5:3", "16:9",
                                                   "19:10", "21:9"])})
     add(D, "Screen", "DISPLAY_SETTINGS.UseLetterbox", "Widescreen letterbox", "toggle")
@@ -336,7 +347,7 @@ def _schema():
     add(D, "Window", "DISPLAY.InitialWindowPositionY", "Window position Y", "number", "-1 centers the window.", hw=True)
 
     add(G, "Preset", "QUALITY.OverallQualityLevelName", "Overall quality", "combo",
-        "Custom keeps the values below. Only the spellings Custom and High are confirmed.",
+        "Custom keeps the values below. Only Custom and High are confirmed as names the game writes.",
         choices={v: v for v in ("Custom", "Low", "Medium", "High", "Ultra")})
     tiers = ["Low", "Medium", "High", "Very High", "Ultra", "Ultra+"]
     for key, label, labels in [("Texture", "Texture quality", tiers[:5]),
@@ -347,10 +358,11 @@ def _schema():
                                ("LensEffects", "Lens effects", ["Off", "Bloom", "Bloom + flare"])]:
         add(G, "Quality", f"CUSTOM_QUALITY.{key}", label, "choice", choices={str(i): l for i, l in enumerate(labels)})
     add(G, "Quality", "CUSTOM_QUALITY.DOF", "Zoom-in depth of field", "toggle")
-    add(G, "Quality", "CUSTOM_QUALITY.Atmospheric", "Atmospheric", "number", "Custom files hold -1. Meaning not documented.")
+    add(G, "Quality", "CUSTOM_QUALITY.Atmospheric", "Atmospheric", "number",
+        "Custom files hold -1. What it does is not documented.")
     up = "Upscaling"
     add(G, up, "CUSTOM_QUALITY.Upscaler", "Upscaling technique", "choice",
-        "Temporal is confirmed. The numbers of Off, DLSS and the two FSR versions are inferred.",
+        "Only Temporal is checked against the game menu. After you save another choice, check it in the game.",
         choices={"0": "Off", "1": "Temporal", "2": "NVIDIA DLSS", "3": "AMD FSR 1.0", "4": "AMD FSR 2.0"})
     add(G, up, "CUSTOM_QUALITY.TemporalUpscalerMode", "Upscaling mode", "choice",
         choices={"0": "Fixed render scaling", "1": "Adaptive render scaling"})
@@ -365,8 +377,8 @@ def _schema():
     add(G, up, "CUSTOM_QUALITY.Sharpness", "Anti-aliasing sharpness", "range", lo=0, hi=100, step=5, scale=5)
     modes = ["Auto", "Quality", "Balanced", "Performance", "Ultra Performance"]
     for key, label, note in [("DLSSPerfQual", "DLSS mode", "Listed in menu order."),
-                             ("FSR2PerfQual", "FSR 2.0 mode", "Assumed to follow the DLSS list."),
-                             ("FSRPerfQual", "FSR 1.0 mode", "Assumed to follow the DLSS list.")]:
+                             ("FSR2PerfQual", "FSR 2.0 mode", "The list is assumed to match DLSS mode."),
+                             ("FSRPerfQual", "FSR 1.0 mode", "The list is assumed to match DLSS mode.")]:
         add(G, up, f"CUSTOM_QUALITY.{key}", label, "choice", f"Used when this upscaler is selected. {note}",
             choices={str(i): n for i, n in enumerate(modes)})
     add(G, "Texture streaming", "CUSTOM_QUALITY.TextureStreaming", "Texture streaming", "number")
@@ -380,7 +392,7 @@ def _schema():
         "Scales both sliders. Default 0.02. A lower value gives finer slider steps.", step=0.0001, digits=6,
         ini_only=True)
     add(M, "Hipfire", "INPUT.MouseSensitivity", "Mouse sensitivity", "range",
-        "Meaning not documented. The two sliders above are the in-game controls.", lo=1, hi=100)
+        "What it does is not documented. The two sliders above are the in-game controls.", lo=1, hi=100)
     add(M, "Aim down sights", "INPUT.ADSMouseUseSpecific", "Per-scope ADS", "toggle")
     add(M, "Aim down sights", "INPUT.ADSMouseSensitivityGlobal", "Global ADS", "range", lo=1, hi=100)
     for scope in SCOPES:
@@ -469,7 +481,8 @@ def _schema():
         "Default picks the region with the lowest ping.", ini_only=True)
     add(N, "Matchmaking", "GAMEPLAY.GameplayPingEnable", "Gameplay ping", "toggle")
     add(N, "Proxy", "ONLINE.UseProxyAutoDiscovery", "Proxy auto discovery", "toggle",
-        "Uses http_proxy, https_proxy, all_proxy and no_proxy for HTTP calls.")
+        "When on, the game looks up http_proxy, https_proxy, all_proxy and no_proxy and uses them for all its web "
+        "requests.")
 
     add(S, "GPU", "DISPLAY.GPUAdapter", "GPU adapter index", "number", hw=True)
     add(S, "GPU", "DISPLAY.GPUAdapterSelectMode", "GPU selection", "choice",
@@ -509,6 +522,39 @@ def auto_spec(sec, key, value):
                 step=1 if not decimals else 10 ** -min(decimals, 3), digits=min(decimals, 4))
 
 
+def search_words(text):
+    # Splits at spaces, hyphens and camelCase, so "VSync" gives "v" and "sync".
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def search_index(fields):
+    # The words of a field are joined, so a query word can run over several: "vsync" and "antialiasing" match.
+    compact, starts = "", []
+    for f in fields:
+        for w in search_words(f):
+            starts.append(len(compact))
+            compact += w
+        compact += " "
+    return compact, starts
+
+
+def search_query(text):
+    # Each typed word gives itself and its synonyms. A synonym like "display mode" must match as one run of words.
+    clauses = []
+    for raw in text.split():
+        w = "".join(search_words(raw))
+        if w:
+            clauses.append([w] + ["".join(search_words(p)) for key, phrases in SYNONYMS.items()
+                                  if key == w or len(w) >= 3 and key.startswith(w) for p in phrases])
+    return clauses
+
+
+def search_hit(index, clauses):
+    compact, starts = index
+    return all(any(compact.startswith(w, s) for w in alts for s in starts) for alts in clauses)
+
+
 @dataclass
 class Profile:
     uuid: str
@@ -538,6 +584,7 @@ class Backup:
     path: Path
     when: datetime
     reason: str
+    keep: bool = False
 
 
 def scan_profiles(root):
@@ -589,44 +636,84 @@ class Store:
     def backup_dir(self, uuid):
         return self.folder / "backups" / uuid
 
-    def backup(self, uuid, src, reason):
+    @staticmethod
+    def backup_name(when, reason, keep):
+        # Windows does not allow some characters in file names, so a time such as 20:09 is written 20.09.
+        text = re.sub(r'[\x00-\x1f<>:"/\\|?*_]', "", re.sub(r"(?<=\d):(?=\d)", ".", reason))
+        text = " ".join(text.split())[:60].strip(" .") or "backup"
+        return f"{when:%Y%m%d-%H%M%S}-{when.microsecond // 1000:03d}_{'keep_' if keep else ''}{text}.ini"
+
+    def backup(self, uuid, data, reason, keep=False):
+        # Returns the new file, or None when the newest backup holds the same bytes. Kept backups skip the rotation.
+        have = self.backups(uuid)
+        if have and not keep:
+            try:
+                if have[0].path.read_bytes() == data:
+                    return None
+            except OSError:
+                pass
         d = self.backup_dir(uuid)
         d.mkdir(parents=True, exist_ok=True)
-        slug = re.sub(r"[^a-z0-9]+", "-", reason.lower()).strip("-")[:48] or "backup"
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest, n = d / f"{stamp}_{slug}.ini", 1
-        while dest.exists():
-            n += 1
-            dest = d / f"{stamp}_{slug}-{n}.ini"
-        shutil.copyfile(src, dest)
-        for old in self.backups(uuid)[MAX_BACKUPS:]:
-            old.path.unlink(missing_ok=True)
+        when = datetime.now()
+        when = when.replace(microsecond=when.microsecond // 1000 * 1000)
+        if have and when <= have[0].when:
+            when = have[0].when + timedelta(milliseconds=1)
+        while (d / self.backup_name(when, reason, keep)).exists():
+            when += timedelta(milliseconds=1)
+        dest = d / self.backup_name(when, reason, keep)
+        dest.write_bytes(data)
+        for old in [b for b in self.backups(uuid) if not b.keep][MAX_BACKUPS:]:
+            try:
+                old.path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return dest
 
+    def backup_before(self, uuid, data, action):
+        # The first backup of a profile is its original, and it is kept.
+        first = not self.backups(uuid)
+        return self.backup(uuid, data, "original" if first else f"before {action}", keep=first)
+
     def backups(self, uuid):
+        # Newer stamps have milliseconds, and kept backups have keep_ before the reason.
         out = []
         for p in self.backup_dir(uuid).glob("*.ini"):
-            m = re.match(r"(\d{8}-\d{6})_(.*)\.ini$", p.name)
+            m = re.match(r"(\d{8}-\d{6})(?:-(\d{3}))?_(keep_)?(.*)\.ini$", p.name)
             try:
-                when = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S") if m else datetime.fromtimestamp(p.stat().st_mtime)
+                when = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").replace(microsecond=int(m.group(2) or 0) * 1000) \
+                    if m else datetime.fromtimestamp(p.stat().st_mtime)
             except (ValueError, OSError):
                 continue
-            out.append(Backup(p, when, (m.group(2) if m else p.stem).replace("-", " ")))
+            # Older names have hyphens for spaces. A date from nice_date gets its colon back.
+            reason = (re.sub(r"(\d{4}, \d{1,2})\.(\d\d)\b", r"\1:\2", m.group(4)) if m.group(2)
+                      else m.group(4).replace("-", " ")) if m else p.stem
+            out.append(Backup(p, when, reason, bool(m and m.group(3))))
         return sorted(out, key=lambda b: (b.when, b.path.name), reverse=True)
 
+    def set_keep(self, b, keep):
+        dest = b.path.with_name(self.backup_name(b.when, b.reason, keep))
+        b.path.rename(dest)
+        b.path, b.keep = dest, keep
 
-def write_profile(store, profile, ini, reason):
-    store.backup(profile.uuid, profile.path, reason)
+
+def write_profile(store, profile, ini, action):
+    # Backups hold every saved version: the file before the write, unless the newest backup has it, and the result.
+    data = ini.to_bytes()
+    store.backup_before(profile.uuid, profile.path.read_bytes(), action)
     locked = profile.locked
     if locked:
         set_locked(profile.path, False)
     try:
         tmp = profile.path.with_name(profile.path.name + ".tmp")
-        tmp.write_bytes(ini.to_bytes())
+        tmp.write_bytes(data)
         os.replace(tmp, profile.path)
     finally:
         if locked:
             set_locked(profile.path, True)
+    try:
+        store.backup(profile.uuid, data, f"after {action}")
+    except OSError:
+        pass  # The next write backs up this version first.
 
 
 @dataclass
@@ -638,21 +725,41 @@ class Bench:
     detail: dict | None = None
 
 
+# Benchmark tiles: decimals, unit, caption, and 1 when higher is better, -1 when lower is better, 0 when neither.
+BENCH_TILES = ((0, "", "average fps", 1), (0, "", "1st percentile of sampled fps", 1), (0, "", "lowest fps", 1),
+               (0, "", "highest fps", 1), (1, " s", "duration", 0), (1, " ms", "average CPU / GPU frame time", -1),
+               (0, "%", "GPU load", 0), (0, " °C", "GPU temperature", 0))
+
+
+def bench_names(folder):
+    # Report names in the benchmark folder with their date and kind. A missing folder has none.
+    out = {}
+    try:
+        names = [p.name for p in Path(folder).iterdir()]
+    except OSError:
+        return out
+    for name in names:
+        m = BENCH_RE.match(name)
+        try:
+            if m:
+                out[name] = (datetime(*map(int, m.groups()[:6])), m.group(7).lower())
+        except ValueError:
+            pass
+    return out
+
+
+def bench_html(when, htmls):
+    # The game writes the report a few seconds after the stats.
+    return next((h for t, h in htmls if 0 <= (t - when).total_seconds() <= 15), None)
+
+
 def scan_benchmarks(root):
     folder = Path(root) / "Benchmark"
-    inis, htmls = [], []
-    try:
-        entries = list(folder.iterdir())
-    except OSError:
-        return []
-    for p in entries:
-        m = BENCH_RE.match(p.name)
-        if m:
-            when = datetime(*map(int, m.groups()[:6]))
-            (inis if m.group(7).lower() == "ini" else htmls).append((when, p))
+    names = bench_names(folder)
+    htmls = [(t, folder / n) for n, (t, kind) in names.items() if kind == "html"]
     out = []
-    for when, p in sorted(inis):
-        html = next((h for t, h in htmls if 0 <= (t - when).total_seconds() <= 15), None)
+    for when, p in sorted((t, folder / n) for n, (t, kind) in names.items() if kind == "ini"):
+        html = bench_html(when, htmls)
         try:
             stats = {k: num(v) for _, k, v in IniFile.load(p).items()}
         except OSError:
@@ -746,6 +853,7 @@ QFrame[seg="choice"] { background: $card_hi; border-radius: 8px; }
 QFrame[seg="choice"] QPushButton, QFrame[seg="tabs"] QPushButton { background: transparent; border-radius: 6px; padding: 0 12px; }
 QFrame[seg="choice"] QPushButton:hover { background: $line; }
 QFrame[seg="tabs"] QPushButton { font-weight: bold; padding: 0 10px; }
+QFrame[seg="tabs"] QPushButton[badge="true"] { padding-right: 40px; }
 QFrame[seg="tabs"] QPushButton:hover { background: $card_hi; }
 QFrame[seg="choice"] QPushButton:pressed, QFrame[seg="tabs"] QPushButton:pressed { padding-top: 2px; }
 QFrame[seg="choice"] QPushButton:checked, QFrame[seg="tabs"] QPushButton:checked { background: $accent_deep; color: #ffffff; }
@@ -848,7 +956,7 @@ def ask_save(parent, text):
 
 def ask_text(parent, title, prompt):
     text, ok = QInputDialog.getText(parent, title, prompt)
-    return text if ok else ""
+    return text if ok else None
 
 
 def mix(a, b, t):
@@ -973,6 +1081,20 @@ def text_at(p, x, y, text, color, anchor="c"):
     left = {"e": x - w, "w": x, "c": x - w / 2}[anchor]
     p.setPen(QColor(color))
     p.drawText(QRectF(left, y - h / 2, w, h), Qt.AlignCenter, text)
+
+
+def paint_count(widget, n, right=10):
+    p = QPainter(widget)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setFont(F.tiny)
+    text = str(n)
+    w = max(24, p.fontMetrics().horizontalAdvance(text) + 12)
+    r = QRectF(widget.width() - right - w, (widget.height() - 20) / 2, w, 20)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(COL["accent"]))
+    p.drawRoundedRect(r, 10, 10)
+    p.setPen(QColor(COL["ink"]))
+    p.drawText(r, Qt.AlignCenter, text)
 
 
 def soft(path):
@@ -1243,7 +1365,7 @@ class FlowLayout(QLayout):
 class Segmented(QFrame):
     picked = Signal(str)
 
-    def __init__(self, values=(), kind="choice", height=32):
+    def __init__(self, values=(), kind="choice", height=32, button=QPushButton):
         super().__init__()
         self.setProperty("seg", kind)
         self.pad = 3 if kind == "choice" else 0
@@ -1251,7 +1373,7 @@ class Segmented(QFrame):
         self.setFixedHeight(height)
         self.lay = hbox(2 if kind == "choice" else 4, (self.pad,) * 4)
         self.setLayout(self.lay)
-        self.buttons, self.value = {}, None
+        self.buttons, self.value, self.button = {}, None, button
         self.set_values(values)
 
     def set_values(self, values):
@@ -1260,7 +1382,7 @@ class Segmented(QFrame):
             discard(b)
         self.buttons, self.value = {}, None
         for v in values:
-            b = QPushButton(v)
+            b = self.button(v)
             b.setCheckable(True)
             b.setFixedHeight(self.inner)
             b.setCursor(Qt.PointingHandCursor)
@@ -1665,8 +1787,13 @@ class LimitControl(RangeControl):
         self.switch.clicked.connect(self._flip)
         self.lay.addWidget(self.switch)
         self.lay.addSpacing(10)
-        self.last = 144.0
+        self.last = None
         super().build()
+
+    def fallback(self):
+        # Turning the cap on starts at the refresh rate when the file has one.
+        hz = num(self.app.value("DISPLAY_SETTINGS", "RefreshRate"))
+        return float(self.clamp(round(hz))) if hz and hz >= self.lo else 144.0
 
     def emit(self, value, key=None):
         v = num(value)
@@ -1675,12 +1802,12 @@ class LimitControl(RangeControl):
         super().emit(value, key)
 
     def _flip(self, *_):
-        self.emit(self.to_file(self.last) if self.switch.isChecked() else "0")
+        self.emit(self.to_file(self.last or self.fallback()) if self.switch.isChecked() else "0")
         self.load()
 
     def current(self):
         v = num(self.value) or 0
-        return v if v >= self.lo else self.last
+        return v if v >= self.lo else self.last or self.fallback()
 
     def load(self):
         v = num(self.value) or 0
@@ -1761,14 +1888,15 @@ class ResolutionControl(Control):
             w, h = "0", "0"
         else:
             if text == self.CUSTOM:
-                text = ask_text(self, "Custom resolution", "Width x height, for example 1728x1080")
+                text = ask_text(self, "Custom resolution", "Width x height, for example 1728x1080") or ""
             m = re.match(r"\s*(\d{3,5})\s*[x×*, ]\s*(\d{3,5})\s*$", text)
             if not m:
                 self.load()
                 return
             w, h = m.groups()
-        self.emit(w, "ResolutionWidth")
-        self.emit(h, "ResolutionHeight")
+        with self.app.group(self.spec.label):
+            self.emit(w, "ResolutionWidth")
+            self.emit(h, "ResolutionHeight")
         self.load()
 
 
@@ -1869,6 +1997,10 @@ class SettingRow(Card):
             self.dirty = dirty
             self.reset.setVisible(dirty)
             self.update()
+        if dirty:
+            saved = [self.app.orig.get(k) for k in self.keys]
+            text = ResolutionControl.res_label(*(v or "0" for v in saved)) if len(saved) == 2 else self.spec.show(saved[0])
+            self.reset.setToolTip(f"Reset to saved value: {text}")
 
 
 class NavItem(QPushButton):
@@ -1890,19 +2022,26 @@ class NavItem(QPushButton):
 
     def paintEvent(self, e):
         super().paintEvent(e)
-        if not self.count:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setFont(F.tiny)
-        text = str(self.count)
-        w = max(24, p.fontMetrics().horizontalAdvance(text) + 12)
-        r = QRectF(self.width() - 10 - w, (self.height() - 20) / 2, w, 20)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(COL["accent"]))
-        p.drawRoundedRect(r, 10, 10)
-        p.setPen(QColor(COL["ink"]))
-        p.drawText(r, Qt.AlignCenter, text)
+        if self.count:
+            paint_count(self, self.count)
+
+
+class TabButton(QPushButton):
+    def __init__(self, text):
+        super().__init__(text)
+        self.count = 0
+
+    def set_count(self, n):
+        if n != self.count:
+            self.count = n
+            restyle(self, badge="true" if n else "false")
+            self.updateGeometry()
+            self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.count:
+            paint_count(self, self.count, 8)
 
 
 class ProfileCard(Card):
@@ -1915,9 +2054,14 @@ class ProfileCard(Card):
         self.setLayout(lay)
         top = hbox(6)
         top.addWidget(label(app.store.name(profile.uuid), "bold"))
+        if selected and app.pending:
+            dot = Dot(8)
+            dot.set_color(COL["accent"])
+            dot.setToolTip("Unsaved changes")
+            top.addWidget(dot, 0, Qt.AlignVCenter)
         top.addStretch()
         if profile.locked:
-            top.addWidget(Pill("LOCKED", COL["bad_dim"], COL["bad"]))
+            top.addWidget(Pill("READ-ONLY", COL["bad_dim"], COL["bad"]))
         lay.addLayout(top)
         if meta["tags"]:
             tags = hbox(4)
@@ -1988,10 +2132,12 @@ class LineChart(QWidget):
         self.setFixedHeight(height)
         self.setMouseTracking(True)
         self.series, self.duration, self.max, self.mx, self.base = [], 0.0, {}, None, None
+        self.empty = ""
 
-    def plot(self, series, duration):
+    def plot(self, series, duration, empty="No samples in this report"):
         self.series = [s for s in series if len(s["y"])]
         self.duration = duration or 0.0
+        self.empty = empty
         self.base = None
         self.update()
 
@@ -2040,7 +2186,7 @@ class LineChart(QWidget):
         if x1 - x0 < 60:
             return
         if not self.series:
-            text_at(p, (x0 + x1) / 2, (y0 + y1) / 2, "No samples in this report", COL["muted"])
+            text_at(p, (x0 + x1) / 2, (y0 + y1) / 2, self.empty, COL["muted"])
             return
         for axis in ("l", "r"):
             ys = [s["y"].max() for s in self.series if s["axis"] == axis]
@@ -2112,10 +2258,10 @@ class BarChart(QWidget):
         self.setFixedHeight(height)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.on_pick, self.items, self.selected, self.hot = on_pick, [], None, None
+        self.on_pick, self.items, self.selected, self.hot, self.compare = on_pick, [], None, None, None
 
-    def plot(self, items, selected):
-        self.items, self.selected = items, selected
+    def plot(self, items, selected, compare=None):
+        self.items, self.selected, self.compare = items, selected, compare
         self.update()
 
     def _slot(self, x):
@@ -2137,7 +2283,8 @@ class BarChart(QWidget):
         p.setPen(Qt.NoPen)
         for i, (_, v) in enumerate(self.items):
             bh = (h - 34) * (v or 0) / top
-            color = COL["accent"] if i == self.selected else (COL["faint"] if i == self.hot else COL["line"])
+            color = (COL["accent"] if i == self.selected else COL["info"] if i == self.compare
+                     else COL["faint"] if i == self.hot else COL["line"])
             p.setBrush(QColor(color))
             p.drawRoundedRect(QRectF(8 + i * slot + slot * 0.15, h - 18 - bh, slot * 0.7, bh), 2, 2)
         text, v = self.items[self.hot if self.hot is not None else (self.selected or 0)]
@@ -2168,7 +2315,7 @@ class Tabs(QWidget):
         self.command, self.current = command, names[0]
         v = vbox(8)
         self.setLayout(v)
-        self.bar = Segmented(names, "tabs", 34)
+        self.bar = Segmented(names, "tabs", 34, TabButton)
         self.bar.picked.connect(self.set)
         v.addWidget(self.bar, 0, Qt.AlignLeft)
         body = Card(COL["panel"], 12)
@@ -2196,6 +2343,13 @@ class Tabs(QWidget):
             self.command()
         self.stack.setCurrentWidget(self.pages[name])
 
+    def step(self, d):
+        names = list(self.pages)
+        self.set(names[(names.index(self.current) + d) % len(names)])
+
+    def set_count(self, name, n):
+        self.bar.buttons[name].set_count(n)
+
 
 class App(QMainWindow):
     TABS = ("Settings", "Profile", "Transfer", "Backups", "Benchmarks")
@@ -2210,19 +2364,21 @@ class App(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.setMinimumSize(1150, 720)
         self.restore_geometry(cfg.get("geometry"))
-        self.profiles, self.current, self.ini = [], None, None
-        self.orig, self.pending, self.history = {}, {}, []
+        self.profiles, self.current, self.ini, self.disk_bytes = [], None, None, None
+        self.orig, self.pending, self.history, self._group = {}, {}, [], None
         self.rows = defaultdict(list)
         self.cat_layout, self.cat_frames, self.nav_items = {}, {}, {}
         self.cat, self.search_frame = None, None
         self.hints, self.datacenters, self._auto, self.watchers = {}, [], {}, []
         self.modes = display_modes()
         self.running, self.file_mtime, self._last_poll, self._polling = False, None, 0.0, False
-        self._timers, self._toast = {}, None
+        self._timers, self._toast, self.action_bars = {}, None, {}
+        self.review_dlg, self.s_info, self.p_info, self._sidebar_dirty = None, None, {}, False
         self.stale = set()
         self.x_extra, self.x_sel, self.x_rows, self.x_vars, self.x_groups = {}, set(), {}, {}, []
-        self.x_summary, self._x_src_last = "", ""
-        self.benches, self.bench_sel, self.b_items = None, None, []
+        self.x_summary, self._x_src_last, self._x_tgt_last, self.x_targets, self.x_same = "", "", "", [], set()
+        self.benches, self.bench_sel, self.b_items, self.b_cmp_i = None, None, [], None
+        self._bench_dir, self._bench_names, self._bench_wait = None, {}, {}
         self.game_state.connect(self._on_game)
         self.build()
         self.rescan(select=cfg.get("last_profile"))
@@ -2232,8 +2388,14 @@ class App(QMainWindow):
         self.poll_timer.timeout.connect(self.poll)
         self.poll_timer.start(1000)
         QTimer.singleShot(400, self.poll)
+        self.watch_bench()
+        self.bench_timer = QTimer(self)
+        self.bench_timer.timeout.connect(self.watch_bench)
+        self.bench_timer.start(2000)
         self.shortcuts = []
-        for keys, fn in (("Ctrl+S", self.save), ("Ctrl+Z", self.undo), ("Ctrl+F", self.focus_search), ("F5", self.rescan)):
+        for keys, fn in (("Ctrl+S", self.save), ("Ctrl+Z", self.undo), ("Ctrl+F", self.focus_search), ("F5", self.rescan),
+                         ("Ctrl+Tab", lambda: self.tabs.step(1)), ("Ctrl+Shift+Tab", lambda: self.tabs.step(-1)),
+                         ("Ctrl+PgDown", lambda: self.tabs.step(1)), ("Ctrl+PgUp", lambda: self.tabs.step(-1))):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(lambda fn=fn: fn())
             self.shortcuts.append(sc)
@@ -2290,12 +2452,15 @@ class App(QMainWindow):
         header.addWidget(self.h_title)
         header.addSpacing(12)
         self.h_uuid = button("", self.copy_uuid, "uuid", height=26, role="tiny_mono")
+        self.h_uuid.setToolTip("Copy profile ID")
         header.addWidget(self.h_uuid)
         header.addStretch()
         self.h_game = Pill("", font=F.small, height=28, radius=8, pad=12)
         header.addWidget(self.h_game)
         header.addSpacing(16)
         self.h_lock = Switch("Read-only", 42, 22)
+        self.h_lock.setToolTip("Siege cannot change this file, so changes made in the game menu are not kept. "
+                               "This app can still save it.")
         self.h_lock.clicked.connect(self.toggle_lock)
         header.addWidget(self.h_lock)
         main.addLayout(header)
@@ -2330,7 +2495,7 @@ class App(QMainWindow):
         self.place_toast()
         t.show()
         t.raise_()
-        QTimer.singleShot(3200, lambda: self._drop_toast(t))
+        QTimer.singleShot(min(8000, max(3000, 2000 + 45 * len(text))), lambda: self._drop_toast(t))
 
     def _drop_toast(self, t):
         if t is self._toast:
@@ -2340,8 +2505,11 @@ class App(QMainWindow):
 
     def place_toast(self):
         if self._toast is not None:
+            # A tab with an action bar at the bottom keeps the toast above it.
             c, t = self.centralWidget(), self._toast
-            t.move(c.width() - t.width() - 24, c.height() - t.height() - 24)
+            bar = self.action_bars.get(self.tabs.get())
+            bottom = bar.mapTo(c, QPoint(0, 0)).y() - 10 if bar is not None and bar.isVisible() else c.height() - 24
+            t.move(c.width() - t.width() - 24, bottom - t.height())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -2422,33 +2590,49 @@ class App(QMainWindow):
         self.p_root.setText(soft(self.root_dir))
         self.benches = None
         target = self.profile_by_uuid(keep) or (self.profiles[0] if self.profiles else None)
-        if target:
+        same = bool(target and self.current and target.uuid == self.current.uuid)
+        if same and target.mtime != self.file_mtime:
+            self.backup_disk_copy()
+        if same and (target.mtime == self.file_mtime or self.pending):
+            # The open profile stays loaded, so edits and the undo history are kept.
+            self.current = target
+            self.stale.add("Transfer")
+            if target.mtime != self.file_mtime:
+                self.file_mtime = target.mtime
+                self.merge_outside_change()
+            else:
+                self.on_tab()
+            self.update_header()
+            self.render_sidebar()
+        elif target:
             self.load_profile(target)
         else:
             self.current = None
-            self.ini = None
-            self.orig, self.pending = {}, {}
+            self.ini, self.disk_bytes = None, None
+            self.orig, self.pending, self.history = {}, {}, []
             self.cat_layout = {}
             self.reset_settings_view()
             self.update_header()
             self.render_sidebar()
+            self.update_dirty()
         if self.tabs.get() == "Benchmarks":
             self.refresh_bench()
 
     def change_root(self):
         d = QFileDialog.getExistingDirectory(self, "Choose the Rainbow Six - Siege settings folder",
                                              str(self.root_dir if self.root_dir.exists() else Path.home()))
-        if d:
-            self.root_dir = Path(d)
-            self.store.data["settings"]["root"] = str(self.root_dir)
-            self.store.save()
-            self.current = None
-            self.rescan()
+        if not d or not self.confirm_discard():
+            return
+        self.root_dir = Path(d)
+        self.store.data["settings"]["root"] = str(self.root_dir)
+        self.store.save()
+        self.current = None
+        self.rescan()
 
     def confirm_discard(self):
         if not self.pending:
             return True
-        answer = ask_save(self, f"Save {len(self.pending)} unsaved changes first?")
+        answer = ask_save(self, f"Save {plural(len(self.changed_rows()), 'unsaved change')} first?")
         if answer is None:
             return False
         if answer:
@@ -2463,16 +2647,16 @@ class App(QMainWindow):
 
     def load_profile(self, profile):
         try:
-            ini = IniFile.load(profile.path)
+            data = profile.path.read_bytes()
         except OSError as e:
             show_msg(self, "error", f"Could not read {profile.path}.\n\n{e}")
             return
-        self.current, self.ini = profile, ini
-        self.orig, self.pending, self.history = ini.values(), {}, []
+        old, self.current = self.current, profile
+        if old and old.uuid != profile.uuid:
+            self.follow_selection()
+        self.use_file(IniFile.from_bytes(data), data)
+        self.pending, self.history = {}, []
         self._auto = {}
-        self.hints = ini.hints()
-        self.datacenters = DATACENTERS + [d for d in ini.datacenters() if d.startswith("gamelift/") and d not in DATACENTERS]
-        self.file_mtime = profile.mtime
         self.store.data["settings"]["last_profile"] = profile.uuid
         self.compute_layout()
         self.reset_settings_view()
@@ -2481,15 +2665,78 @@ class App(QMainWindow):
         self.update_dirty()
         self.stale = {"Profile", "Transfer", "Backups"}
         self.on_tab()
+        self.refresh_file_info()
+
+    def use_file(self, ini, data):
+        self.ini, self.orig, self.disk_bytes = ini, ini.values(), data
+        self.hints = ini.hints()
+        self.datacenters = DATACENTERS + [d for d in ini.datacenters() if d.startswith("gamelift/") and d not in DATACENTERS]
+        self.file_mtime = self.current.mtime
 
     def reload_current(self):
+        # load_profile keeps the shown category and search.
         if self.current:
-            cat = self.cat
             self.load_profile(self.current)
-            if cat in self.cat_layout:
-                self.show_category(cat)
+
+    def backup_disk_copy(self):
+        # Before an outside change replaces it, the version read last goes to Backups unless the newest backup has it.
+        if self.current and self.disk_bytes is not None:
+            try:
+                if self.store.backup_before(self.current.uuid, self.disk_bytes, "outside change"):
+                    self.stale.add("Backups")
+            except OSError:
+                pass
+
+    def merge_outside_change(self):
+        # Pending edits stay. Rows without an edit show the new file.
+        self.commit_focus()
+        try:
+            data = self.current.path.read_bytes()
+        except OSError:
+            self.on_tab()
+            return
+        old = self.orig
+        self.use_file(IniFile.from_bytes(data), data)
+        new = self.orig
+        # Undo steps for keys the file changed would bring back values the game replaced.
+        self.history = [e for e in self.history if all(old.get(k) == new.get(k) for k, _, _ in e.changes)]
+        for k in [k for k, v in self.pending.items() if new.get(k) == v]:
+            del self.pending[k]
+        removed = self.changed_rows([k for k in self.pending if k not in new])
+        conflicts = self.changed_rows([k for k in self.pending if k in new and old.get(k) != new.get(k)])
+        if set(old) != set(new):
+            self.compute_layout()
+            self.reset_settings_view()
+        else:
+            for r in self.all_rows():
+                if not any(k in self.pending for k in r.keys):
+                    r.load()
+                r.mark()
+            self.watchers = [w for w in self.watchers if w()]
+        self.update_dirty()
+        self.refresh_file_info()
+        self.stale |= {"Transfer", "Backups"}
+        self.on_tab()
+        n = len(self.changed_rows())
+        text = "Siege changed the settings file." if self.running else "The settings file changed on disk."
+        if not n:
+            text += " It now matches your edits."
+        else:
+            text += " Your edit is kept." if n == 1 else f" Your {n} edits are kept."
+            names = list(self.row_names(sorted(conflicts, key=lambda k: RANK.get(k, 1e9))).values())
+            if len(names) == 1:
+                text += f" Your edit replaces its new {names[0]}."
+            elif names:
+                what = " and ".join(names) if len(names) == 2 else f"values for {len(names)} settings"
+                text += f" Your edits replace its new {what}."
+            names = list(self.row_names(removed).values())
+            if names:
+                text += f" Saving adds back {' and '.join(names) if len(names) < 3 else plural(len(names), 'setting')}, " \
+                        f"which the file no longer has."
+        self.toast(text, "info")
 
     def render_sidebar(self):
+        self._sidebar_dirty = bool(self.pending)
         clear_layout(self.plist_lay)
         q = self.p_filter.text().strip().lower()
         shown = 0
@@ -2521,6 +2768,21 @@ class App(QMainWindow):
         self.h_lock.setEnabled(True)
         self.h_lock.setChecked(p.locked)
 
+    def refresh_file_info(self):
+        # The Settings nav and the Profile tab show the saved time, size, key count and read-only state.
+        p = self.current
+        when = datetime.fromtimestamp(p.mtime) if p and p.mtime else None
+        if self.s_info is not None:
+            self.s_info.setText(f"{plural(len(self.orig), 'key')}\nsaved {nice_date(when)}" if when else "")
+        if p and self.p_info:
+            try:
+                size = p.path.stat().st_size
+            except OSError:
+                size = 0
+            for k, v in (("Saved", nice_date(when) if when else "unknown"), ("Size", f"{size:,} bytes"),
+                         ("Keys", str(len(self.orig))), ("Read-only", "yes" if p.locked else "no")):
+                self.p_info[k].setText(v)
+
     def copy_uuid(self):
         if self.current:
             QGuiApplication.clipboard().setText(self.current.uuid)
@@ -2534,10 +2796,13 @@ class App(QMainWindow):
             set_locked(self.current.path, want)
         except OSError as e:
             show_msg(self, "error", f"Could not change the file attribute.\n\n{e}")
+            self.update_header()
+            return
         self.update_header()
         self.render_sidebar()
-        self.toast("Locked. The game cannot overwrite this file, and changes made in the game menu will not save."
-                   if want else "Unlocked. The game can save settings again.", "info")
+        self.refresh_file_info()
+        self.toast("The file is read-only. Siege cannot change it, so changes made in the game menu are not kept."
+                   if want else "The file is no longer read-only. Siege can save settings again.", "info")
 
     def profile_menu(self, profile, pos):
         menu = QMenu(self)
@@ -2586,6 +2851,7 @@ class App(QMainWindow):
         for b in (self.s_undo, self.s_review, self.s_revert, self.s_save):
             bl.addWidget(b)
         v.addWidget(bar)
+        self.action_bars["Settings"] = bar
 
     def focus_search(self):
         self.tabs.set("Settings")
@@ -2624,7 +2890,7 @@ class App(QMainWindow):
         self.rows = defaultdict(list)
         self.watchers = []
         clear_layout(self.nav_lay)
-        self.nav_items = {}
+        self.nav_items, self.s_info = {}, None
         if not self.cat_layout:
             msg = label("No settings loaded.", tone="muted", margins=(0, 40, 0, 0))
             msg.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
@@ -2635,11 +2901,13 @@ class App(QMainWindow):
             self.nav_lay.addWidget(item)
             self.nav_items[cat] = item
         if self.current:
-            mod = datetime.fromtimestamp(self.current.mtime) if self.current.mtime else None
-            self.nav_lay.addWidget(label(f"{len(self.orig)} keys\nsaved {nice_date(mod)}" if mod else "", "small", "faint",
-                                         margins=(12, 16, 12, 0)))
+            self.s_info = label("", "small", "faint", margins=(12, 16, 12, 0))
+            self.nav_lay.addWidget(self.s_info)
+            self.refresh_file_info()
         self.nav_lay.addStretch()
         self.show_category(self.cat if self.cat in self.cat_layout else next(iter(self.cat_layout)))
+        if self.s_search.text().strip():
+            self.run_search()
 
     def settings_page(self):
         area, lay = scroll_area((2, 0, 10, 12))
@@ -2651,7 +2919,8 @@ class App(QMainWindow):
         self.s_holder.removeWidget(area)
         discard(area)
 
-    def build_rows(self, lay, items, token, search=False):
+    def build_rows(self, lay, items, token, tools=None):
+        # tools names the groups that show their tool box. None shows all of them.
         for title, specs in items:
             lay.addWidget(label(title.upper(), "caps", "faint", margins=(8, 16, 8, 2)))
             cat, group = specs[0].cat, specs[0].group
@@ -2660,7 +2929,7 @@ class App(QMainWindow):
                 lay.addWidget(label(note, "small", "faint", wrap=True, margins=(8, 0, 8, 2)))
             lay.addSpacing(4)
             _, cl = self.card(lay, margins=(6, 6, 6, 6), spacing=2)
-            if not search:
+            if tools is None or (cat, group) in tools:
                 if (cat, group) == ("Mouse", "Hipfire"):
                     self.sens_panel(cl, token)
                 elif (cat, group) == ("Mouse", "Aim down sights"):
@@ -2689,9 +2958,18 @@ class App(QMainWindow):
             self.cat_frames[cat] = self.build_category(cat)
         self.s_holder.setCurrentWidget(self.cat_frames[cat])
 
+    def search_fields(self, spec):
+        fields = [spec.label, spec.key, spec.help, self.hint(spec), spec.group, spec.cat]
+        if spec.kind in ("choice", "combo"):
+            fields += list((spec.choices or {}).values())
+        elif spec.kind == "datacenter":
+            fields += [region_label(v) for v in self.datacenters]
+        return fields
+
     def run_search(self):
         q = self.s_search.text().strip().lower()
-        if not q:
+        clauses = search_query(q)
+        if not clauses:
             if self.search_frame:
                 self.kill_page(self.search_frame)
                 self.search_frame = None
@@ -2702,15 +2980,20 @@ class App(QMainWindow):
             self.kill_page(self.search_frame)
         for item in self.nav_items.values():
             item.set_active(False)
+        # The sensitivity calculator answers words like dpi and cm/360 that no setting holds.
+        calc = ("Mouse", "Hipfire")
+        calc_hit = search_hit(search_index(CALCULATOR_TEXT), clauses)
         groups = []
         for cat, cat_groups in self.cat_layout.items():
             for group, specs in cat_groups.items():
-                hits = [s for s in specs if q in f"{s.label} {s.key} {s.help} {group} {cat}".lower()]
+                extra = SENS_KEYS if calc_hit and (cat, group) == calc else ()
+                hits = [s for s in specs
+                        if (s.sec, s.key) in extra or search_hit(search_index(self.search_fields(s)), clauses)]
                 if hits:
                     groups.append((f"{cat}  ·  {group}", hits))
         area, lay = self.settings_page()
         if groups:
-            self.build_rows(lay, groups, area.token, search=True)
+            self.build_rows(lay, groups, area.token, tools={calc} if calc_hit else ())
         else:
             msg = label(f'No setting matches "{q}".', tone="muted", margins=(0, 40, 0, 0))
             msg.setAlignment(Qt.AlignHCenter)
@@ -2740,15 +3023,16 @@ class App(QMainWindow):
         fn()
 
     def sens_panel(self, cl, token):
-        yk, pk, mk = ("INPUT", "MouseYawSensitivity"), ("INPUT", "MousePitchSensitivity"), ("INPUT", "MouseSensitivityMultiplierUnit")
+        yk, pk, mk = SENS_KEYS
         if not all(k in self.orig for k in (yk, pk, mk)):
             return
-        meta = self.store.meta(self.current.uuid)
+        meta, cfg = self.store.meta(self.current.uuid), self.store.data["settings"]
         bl = self.tool_box(cl, "Sensitivity calculator")
         read = label("", "mono")
         bl.addWidget(read)
         line = hbox(6)
-        dpi = self.tool_entry(line, "Mouse DPI", 70, f"{meta.get('dpi', 800):g}")
+        # A profile without its own DPI starts from the last DPI entered on any profile.
+        dpi = self.tool_entry(line, "Mouse DPI", 70, f"{meta.get('dpi') or cfg.get('last_dpi') or 800:g}")
         line.addSpacing(18)
         cm = self.tool_entry(line, "Target cm/360", 70)
         line.addWidget(button("Match", lambda: match_cm(), width=70))
@@ -2767,11 +3051,14 @@ class App(QMainWindow):
             return [num(self.value(*k)) or 0 for k in (yk, pk, mk)]
 
         def dpi_value():
-            d = num(dpi.text())
+            return num(dpi.text()) or 0
+
+        def dpi_edited():
+            d = dpi_value()
             if d and d != meta.get("dpi"):
-                meta["dpi"] = d
-                self.store.save()
-            return d or 0
+                meta["dpi"] = cfg["last_dpi"] = d
+                self.debounce("dpi", 600, self.store.save)
+            refresh()
 
         def refresh():
             if not token.alive:
@@ -2794,12 +3081,16 @@ class App(QMainWindow):
             target = int(round(target))
             new_mult = yaw * mult / target
             new_pitch = min(100, max(1, round(pitch * mult / new_mult)))
-            self.set_value(*mk, f"{new_mult:.6f}")
-            self.set_value(*yk, str(target))
-            self.set_value(*pk, str(new_pitch))
-            drift = abs(new_pitch * new_mult - pitch * mult)
+            with self.group("Keep my feel"):
+                self.set_value(*mk, f"{new_mult:.6f}")
+                self.set_value(*yk, str(target))
+                self.set_value(*pk, str(new_pitch))
+            # The vertical slider takes whole steps, so its feel can drift a little.
+            drift = new_pitch * new_mult / (pitch * mult) - 1 if pitch * mult else 0
+            pct = f"{abs(drift):.0%}" if abs(drift) >= 0.005 else "less than 1%"
             self.toast(f"Slider {target}, multiplier {new_mult:.6f}. Horizontal is unchanged"
-                       + (f", vertical moved by {drift:.6f}." if drift > 1e-9 else ", vertical too."), "info")
+                       + (f", vertical is {pct} {'faster' if drift > 0 else 'slower'}." if abs(drift) > 1e-9
+                          else ", vertical too."), "info")
 
         def match_cm():
             target, d = num(cm.text()), dpi_value()
@@ -2808,10 +3099,11 @@ class App(QMainWindow):
                 self.toast("Enter your DPI and a target cm/360.", "bad")
                 return
             deg = 2.54 * 360 / (target * d)
-            self.set_value(*mk, f"{deg / DEG_PER_COUNT / yaw * 0.02:.6f}")
+            with self.group("Match cm/360"):
+                self.set_value(*mk, f"{deg / DEG_PER_COUNT / yaw * 0.02:.6f}")
             self.toast(f"Multiplier set for {target:g} cm/360 at {d:g} DPI.", "info")
 
-        dpi.textEdited.connect(lambda _: refresh())
+        dpi.textEdited.connect(lambda _: dpi_edited())
         self.watch(refresh)
 
     def scope_panel(self, cl, prefix):
@@ -2822,16 +3114,18 @@ class App(QMainWindow):
         line = hbox(8)
         value = self.tool_entry(line, "Value", 60, "50")
 
-        def set_all(v):
+        def set_all(v, name):
             v = num(v)
             if v is None:
                 return
-            for k in keys:
-                self.set_value(*k, str(int(round(min(100, max(1, v))))))
+            with self.group(name):
+                for k in keys:
+                    self.set_value(*k, str(int(round(min(100, max(1, v))))))
 
-        line.addWidget(button("Set every scope", lambda: set_all(value.text()), width=130))
-        line.addWidget(button("Copy 1x to all", lambda: set_all(self.value("INPUT", f"{prefix}1x")), width=120))
-        line.addWidget(button("Match hipfire (50)", lambda: set_all(50), width=140))
+        line.addWidget(button("Set every scope", lambda: set_all(value.text(), "Set every scope"), width=130))
+        line.addWidget(button("Copy 1x to all", lambda: set_all(self.value("INPUT", f"{prefix}1x"), "Copy 1x to all"),
+                              width=120))
+        line.addWidget(button("Match hipfire (50)", lambda: set_all(50, "Match hipfire"), width=140))
         line.addStretch()
         bl.addLayout(line)
 
@@ -2841,12 +3135,7 @@ class App(QMainWindow):
         if value == before:
             return
         if record:
-            now = time.monotonic()
-            if self.history and self.history[-1][0] == k and now - self.history[-1][3] < 1.2:
-                self.history[-1] = (k, self.history[-1][1], value, now)
-            else:
-                self.history.append((k, before, value, now))
-                del self.history[:-500]
+            self.record(k, before, value)
         if value == self.orig.get(k):
             self.pending.pop(k, None)
         else:
@@ -2858,42 +3147,92 @@ class App(QMainWindow):
         self.watchers = [w for w in self.watchers if w()]
         self.update_dirty()
 
+    def record(self, k, before, after):
+        # A history entry holds a label and a list of (key, before, after). Only single-key entries have a time.
+        if self._group is not None:
+            self._group.append((k, before, after))
+            return
+        now, last = time.monotonic(), self.history[-1] if self.history else None
+        if last and last.t and last.changes[0][0] == k and now - last.t < 1.2:
+            last.changes[0], last.t = (k, last.changes[0][1], after), now
+        else:
+            self.history.append(SimpleNamespace(label=self.spec(*k).label, changes=[(k, before, after)], t=now))
+            del self.history[:-500]
+
+    @contextmanager
+    def group(self, label):
+        # Collects the set_value calls inside into one undo step. A nested group joins the outer one.
+        if self._group is not None:
+            yield
+            return
+        self._group = []
+        try:
+            yield
+        finally:
+            changes, self._group = self._group, None
+            if changes:
+                self.history.append(SimpleNamespace(label=label, changes=changes, t=None))
+                del self.history[:-500]
+                self.update_dirty()
+
     def reset_keys(self, keys):
-        for k in keys:
-            if k in self.pending:
-                self.set_value(*k, self.orig.get(k))
+        with self.group(self.spec(*keys[0]).label):
+            for k in keys:
+                if k in self.pending:
+                    self.set_value(*k, self.orig.get(k))
 
     def undo(self):
         if not self.history:
             return
-        k, before, _after, _t = self.history.pop()
-        self.set_value(*k, before, record=False)
-        self.toast(f"Undid {self.spec(*k).label}.", "info")
+        entry = self.history.pop()
+        for k, before, _after in reversed(entry.changes):
+            self.set_value(*k, before, record=False)
+        self.update_dirty()
+        self.toast(f"Undid {entry.label}.", "info")
 
     def revert(self):
         if not self.pending:
             return
-        keys = list(self.pending)
-        self.pending.clear()
-        self.history.clear()
-        for k in keys:
-            for row in self.live_rows(k):
-                row.load()
-                row.mark()
-        self.watchers = [w for w in self.watchers if w()]
-        self.update_dirty()
+        n = len(self.changed_rows())
+        with self.group("Revert all"):
+            for k in list(self.pending):
+                self.set_value(*k, self.orig.get(k))
+        self.toast(f"Reverted {plural(n, 'change')}. Press Ctrl+Z to bring {'it' if n == 1 else 'them'} back.", "info")
+
+    def changed_rows(self, keys=None):
+        # The hidden height key belongs to the resolution row, so the pair counts once.
+        return list(dict.fromkeys((k[0], "ResolutionWidth") if self.spec(*k).kind == "hidden" else k
+                                  for k in (self.pending if keys is None else keys)))
+
+    def row_names(self, keys):
+        # Rows with the same label get their category in front, as in "Mouse  ·  ADS 1x".
+        names = {k: self.spec(*k).label for k in keys}
+        twice = {n for n, c in Counter(names.values()).items() if c > 1}
+        return {k: f"{self.spec(*k).cat}  ·  {n}" if n in twice else n for k, n in names.items()}
+
+    def all_rows(self):
+        return list(dict.fromkeys(r for rows in self.rows.values() for r in rows if r.token.alive))
 
     def update_dirty(self):
-        n = len(self.pending)
-        self.s_count.setText(f"{n} unsaved change{'s' if n != 1 else ''}" if n else "No unsaved changes")
+        rows = self.changed_rows()
+        n = len(rows)
+        text = plural(n, "unsaved change") if n else "No unsaved changes"
+        self.s_count.setText(f"{text}. Saving waits until Siege closes." if n and self.running else text)
         restyle(self.s_count, tone="accent" if n else "muted")
         self.s_revert.setEnabled(bool(n))
         self.s_review.setEnabled(bool(n))
         self.s_undo.setEnabled(bool(self.history))
         self.s_save.setEnabled(bool(n) and not self.running)
-        counts = Counter(self.spec(*k).cat for k in self.pending if self.spec(*k).kind != "hidden")
+        self.s_save.setToolTip("Close Siege to save. The game rewrites its settings file when it exits, so changes "
+                               "saved now would be lost." if self.running else "")
+        counts = Counter(self.spec(*k).cat for k in rows)
         for cat, item in self.nav_items.items():
             item.set_count(counts.get(cat, 0))
+        self.tabs.set_count("Settings", n)
+        if bool(self.pending) != self._sidebar_dirty:
+            self.render_sidebar()
+        if self.review_dlg is not None:
+            self.debounce("review", 0, self.review_dlg.fill)
         self.setWindowTitle(f"{APP_NAME} {__version__}{'  (unsaved changes)' if n else ''}")
 
     def save(self):
@@ -2906,30 +3245,36 @@ class App(QMainWindow):
             ini = IniFile.load(self.current.path)
             for (sec, key), v in self.pending.items():
                 ini.set(sec, key, v)
-            write_profile(self.store, self.current, ini, "before edit")
+            write_profile(self.store, self.current, ini, "edit")
         except OSError as e:
             show_msg(self, "error", f"Saving failed. The file was not changed.\n\n{e}")
             return False
-        n = len(self.pending)
-        self.ini, self.orig = ini, ini.values()
+        n = len(self.changed_rows())
         self.pending.clear()
         self.history.clear()
-        self.file_mtime = self.current.mtime
-        for rows in self.rows.values():
-            for r in rows:
-                if r.token.alive:
-                    r.mark()
-        self.update_dirty()
+        self.use_file(ini, ini.to_bytes())
+        # The file was read again before the write, so every row shows what is on disk now.
+        for r in self.all_rows():
+            r.load()
+            r.mark()
+        self.watchers = [w for w in self.watchers if w()]
         self.render_sidebar()
+        self.update_dirty()
+        self.refresh_file_info()
         self.stale |= {"Backups", "Transfer"}
-        self.toast(f"Saved {n} change{'s' if n != 1 else ''}. The previous file is in Backups.")
+        locked = " The file stays read-only." if self.current.locked else ""
+        self.toast(f"Saved {plural(n, 'change')}. The previous file is in Backups.{locked}")
         return True
 
     def review_changes(self):
         if not self.pending:
             return
+        if self.review_dlg is not None:
+            self.review_dlg.raise_()
+            self.review_dlg.activateWindow()
+            return
         dlg = QDialog(self)
-        dlg.setWindowTitle("Unsaved changes")
+        dlg.setWindowTitle(f"Unsaved changes in {self.store.name(self.current.uuid)}")
         dlg.resize(720, 480)
         dlg.setAttribute(Qt.WA_DeleteOnClose)
         v = vbox(10, (12, 12, 12, 12))
@@ -2938,25 +3283,49 @@ class App(QMainWindow):
         v.addWidget(area, 1)
 
         def fill():
+            # update_dirty calls this, so the list follows the edits while the dialog is open.
+            if self.review_dlg is not dlg:
+                return
+            if not self.pending:
+                dlg.close()
+                return
             clear_layout(lay)
-            for k in sorted(self.pending, key=lambda k: RANK.get(k, 1e9)):
+            rows = sorted(self.changed_rows(), key=lambda k: RANK.get(k, 1e9))
+            for k, name in self.row_names(rows).items():
                 spec = self.spec(*k)
+                if spec.kind == "resolution" and (k[0], "ResolutionHeight") in self.orig:
+                    keys = [k, (k[0], "ResolutionHeight")]
+                    was = ResolutionControl.res_label(*(self.orig.get(x) or "0" for x in keys))
+                    now = ResolutionControl.res_label(*(self.value(*x) or "0" for x in keys))
+                else:
+                    keys, was, now = [k], spec.show(self.orig.get(k)), spec.show(self.value(*k))
                 row = Card(COL["card"], 8)
                 rl = hbox(8, (12, 6, 8, 6))
                 row.setLayout(rl)
-                rl.addWidget(label(spec.label if spec.kind != "resolution" else "Resolution width", width=220))
-                rl.addWidget(label(f"{spec.show(self.orig.get(k))}   →   {spec.show(self.pending[k])}", "mono", "accent"), 1)
-                rl.addWidget(button("Undo", lambda k=k: (self.set_value(*k, self.orig.get(k)), fill()), width=70))
+                rl.addWidget(label(name, wrap=True, width=250))
+                rl.addWidget(label(f"{was}   →   {now}", "mono", "accent"), 1)
+                undo = button("Undo", lambda keys=keys: self.reset_keys(keys), width=70)
+                undo.setAutoDefault(False)
+                rl.addWidget(undo)
                 lay.addWidget(row)
             lay.addStretch()
-            if not self.pending:
-                dlg.close()
 
+        def closed(*_):
+            if self.review_dlg is dlg:
+                self.review_dlg = None
+
+        dlg.fill = fill
+        dlg.finished.connect(closed)
+        self.review_dlg = dlg
         fill()
         bar = hbox(8)
         bar.addStretch()
-        bar.addWidget(button("Close", dlg.close))
-        bar.addWidget(button("Save changes", lambda: self.save() and dlg.close(), "primary"))
+        close = button("Close", dlg.close)
+        close.setAutoDefault(False)
+        bar.addWidget(close)
+        save = button("Save changes", lambda: self.save() and dlg.close(), "primary")
+        save.setDefault(True)
+        bar.addWidget(save)
         v.addLayout(bar)
         dlg.show()
 
@@ -2979,26 +3348,36 @@ class App(QMainWindow):
         if self.blocked():
             return
         values = {k: self.value(*k) for k in keys}
-        done = []
+        done, same = [], []
         for p in targets:
             try:
                 ini = IniFile.load(p.path)
+                if all(ini.get(*k) == v for k, v in values.items()):
+                    same.append(self.store.name(p.uuid))
+                    continue
                 for k, v in values.items():
                     ini.set(*k, v)
-                write_profile(self.store, p, ini, f"before copy of {keys[0][1]}")
+                write_profile(self.store, p, ini, f"copy of {self.spec(*keys[0]).label}")
                 done.append(self.store.name(p.uuid))
             except OSError as e:
                 show_msg(self, "error", f"Could not update {self.store.name(p.uuid)}.\n\n{e}")
+        parts = []
         if done:
             self.stale |= {"Transfer"}
             self.render_sidebar()
-            self.toast(f"Applied {self.spec(*keys[0]).label} to {', '.join(done)}. Backups were saved.")
+            parts.append(f"Applied {self.spec(*keys[0]).label} to {', '.join(done)}. "
+                         + ("A backup was saved." if len(done) == 1 else "Backups were saved."))
+        if same:
+            parts.append(f"{', '.join(same)} already {'has' if len(same) == 1 else 'have'} this value.")
+        if parts:
+            self.toast(" ".join(parts), "ok" if done else "info")
 
     # profile tab
 
     def build_profile_tab(self):
         p = self.current
         if not p:
+            self.p_info = {}
             self.page_content("Profile")
             return
         meta = self.store.meta(p.uuid)
@@ -3046,8 +3425,10 @@ class App(QMainWindow):
         tagbox.addWidget(add)
 
         def add_tag(tag):
+            # A tag that exists with other capitals is reused, so "Main" and "main" stay one tag.
             tag = tag.strip()
-            if tag and tag not in meta["tags"]:
+            tag = next((t for t in self.store.all_tags() if t.lower() == tag.lower()), tag)
+            if tag and tag.lower() not in {t.lower() for t in meta["tags"]}:
                 meta["tags"].append(tag)
                 commit()
                 self.build_profile_tab()
@@ -3055,12 +3436,15 @@ class App(QMainWindow):
 
         add.returnPressed.connect(lambda: add_tag(add.text()))
         self.p_tag_entry = add
-        suggestions = [tg for tg in self.store.all_tags() + ["main", "smurf", "stretched", "stream"] if tg not in meta["tags"]]
+        have, suggestions = {t.lower() for t in meta["tags"]}, {}
+        for tg in self.store.all_tags() + ["main", "smurf", "stretched", "stream"]:
+            if tg.lower() not in have:
+                suggestions.setdefault(tg.lower(), tg)
         if suggestions:
             sug = QWidget()
             flow = FlowLayout(sug, 4)
             flow.addWidget(label("Quick add", "small", "faint", margins=(0, 3, 4, 0)))
-            for tg in list(dict.fromkeys(suggestions))[:9]:
+            for tg in list(suggestions.values())[:9]:
                 flow.addWidget(button(f"+ {tg}", lambda tg=tg: add_tag(tg), "quick", height=24))
             tagbox.addWidget(sug)
         g.addLayout(tagbox, 2, 1)
@@ -3101,13 +3485,14 @@ class App(QMainWindow):
         info.setHorizontalSpacing(8)
         info.setVerticalSpacing(3)
         info.setColumnStretch(1, 1)
-        when = datetime.fromtimestamp(p.mtime) if p.mtime else None
-        size = p.path.stat().st_size if p.path.exists() else 0
-        for i, (k, v) in enumerate((("Path", soft(p.path)), ("Saved", nice_date(when) if when else "unknown"),
-                                    ("Size", f"{size:,} bytes"), ("Keys", str(len(self.orig))),
-                                    ("Read-only", "yes" if p.locked else "no"))):
+        self.p_info = {}
+        for i, k in enumerate(("Path", "Saved", "Size", "Keys", "Read-only")):
             info.addWidget(label(k, "small", "muted", width=90), i, 0, Qt.AlignTop)
-            info.addWidget(label(v, "tiny_mono", wrap=True), i, 1)
+            value = label(soft(p.path) if k == "Path" else "", "tiny_mono", wrap=True)
+            info.addWidget(value, i, 1)
+            if k != "Path":
+                self.p_info[k] = value
+        self.refresh_file_info()
         fl.addLayout(info)
         btns = hbox(8)
         btns.addWidget(button("Open folder", lambda: self.open_path(p.folder)))
@@ -3120,10 +3505,25 @@ class App(QMainWindow):
         self.page_content("Profile", area)
 
     def backup_now(self):
-        if self.current:
-            self.store.backup(self.current.uuid, self.current.path, "manual")
-            self.stale.add("Backups")
-            self.toast("Backup saved.")
+        # A named backup is kept. Returns True when a new backup was saved.
+        p = self.current
+        if not p:
+            return False
+        name = ask_text(self, "Back up now", "Name this backup to keep it. Leave it empty for a normal backup.")
+        if name is None:
+            return False
+        name = name.strip()
+        try:
+            dest = self.store.backup(p.uuid, p.path.read_bytes(), name or "manual", keep=bool(name))
+        except OSError as e:
+            show_msg(self, "error", f"The backup failed.\n\n{e}")
+            return False
+        if not dest:
+            self.toast("Nothing changed since the last backup.", "info")
+            return False
+        self.stale.add("Backups")
+        self.toast(f'Backup "{name}" saved. It stays until you delete it.' if name else "Backup saved.")
+        return True
 
     def export_copy(self):
         p = self.current
@@ -3135,13 +3535,18 @@ class App(QMainWindow):
         if dest:
             if not Path(dest).suffix:
                 dest += ".ini"
-            shutil.copyfile(p.path, dest)
+            try:
+                shutil.copyfile(p.path, dest)
+            except OSError as e:
+                show_msg(self, "error", f"The export failed.\n\n{e}")
+                return
             self.toast(f"Exported to {dest}.")
 
     def import_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import from file", "", "Settings file (*.ini);;All files (*.*)")
-        if path:
-            self.start_transfer(self.add_extra_source("file", Path(path)))
+        ref = self.add_file_source(path) if path else None
+        if ref:
+            self.start_transfer(ref)
 
     # transfer tab
 
@@ -3155,7 +3560,7 @@ class App(QMainWindow):
         self.x_src = Combo([""], height=34)
         self.x_src.activated.connect(lambda i: self.pick_source(self.x_src.itemText(i)))
         self.x_tgt = Combo([""], height=34)
-        self.x_tgt.activated.connect(lambda i: self.refresh_transfer(rebuild_menus=False, clear=True))
+        self.x_tgt.activated.connect(lambda i: self.refresh_transfer(rebuild_menus=False))
         for c in (self.x_src, self.x_tgt):
             c.setMinimumWidth(150)
             c.setMaximumWidth(280)
@@ -3195,6 +3600,7 @@ class App(QMainWindow):
         for b in (self.x_preset, self.x_delpreset, self.x_apply):
             bl.addWidget(b)
         v.addWidget(bar)
+        self.action_bars["Transfer"] = bar
 
     def plabel(self, uuid):
         name = self.store.meta(uuid)["label"]
@@ -3211,34 +3617,90 @@ class App(QMainWindow):
         return opts
 
     def target_options(self):
-        return {self.plabel(p.uuid): p.uuid for p in self.profiles}
+        opts = {self.plabel(p.uuid): p.uuid for p in self.profiles}
+        if len(self.profiles) > 1:
+            opts["All other profiles"] = "all"
+        return opts
+
+    def transfer_targets(self, src_ref):
+        # All other profiles means every profile except the source, or except the selected one for other sources.
+        tgt = self.target_options().get(self.x_tgt.get())
+        if tgt == "all":
+            skip = src_ref[1] if src_ref and src_ref[0] == "profile" else self.current and self.current.uuid
+            return [p for p in self.profiles if p.uuid != skip]
+        p = self.profile_by_uuid(tgt)
+        return [p] if p else []
 
     def add_extra_source(self, kind, path, name=None):
-        name = name or f"File: {path.name}"
+        # A name that another file already uses gets a number.
+        base = name = name or f"File: {path.name}"
+        n = 1
+        while self.x_extra.get(name, (kind, path)) != (kind, path):
+            n += 1
+            name = f"{base} ({n})"
         self.x_extra[name] = (kind, path)
         return self.x_extra[name]
 
+    def add_file_source(self, path):
+        # A file joins From only when it holds Siege settings.
+        try:
+            keys = IniFile.load(path).values()
+        except OSError as e:
+            show_msg(self, "error", f"Could not read {path}.\n\n{e}")
+            return None
+        if not any(k in SPECS or k in self.orig for k in keys):
+            show_msg(self, "info", "This file has no Rainbow Six Siege settings.")
+            return None
+        return self.add_extra_source("file", Path(path))
+
+    def update_backup_source(self, path, new=None):
+        # From follows a backup that was renamed, and loses one that was deleted.
+        for name, ref in list(self.x_extra.items()):
+            if ref == ("backup", path):
+                if new is None:
+                    del self.x_extra[name]
+                else:
+                    self.x_extra[name] = ("backup", new)
+        self.stale.add("Transfer")
+
     def start_transfer(self, src_ref, target_uuid=None):
         self.stale.discard("Transfer")
+        last = self.target_options().get(self.x_tgt.get())
         src_label = next((k for k, v in self.source_options().items() if v == src_ref), None)
         self.refresh_transfer()
         if src_label:
             self.x_src.set(src_label)
         tgt = target_uuid or (self.current.uuid if self.current else None)
+        if src_ref == ("profile", tgt):
+            # The source is never the target. The last target stays, or the first other profile is used.
+            others = [p.uuid for p in self.profiles if p.uuid != tgt]
+            tgt = last if last and last != tgt else next(iter(others), None)
         tgt_label = next((k for k, v in self.target_options().items() if v == tgt), None)
         if tgt_label:
             self.x_tgt.set(tgt_label)
         self.refresh_transfer(rebuild_menus=False, clear=True)
         self.tabs.set("Transfer")
 
+    def follow_selection(self):
+        # To follows the sidebar selection. When From was that profile, it takes the previous To.
+        new = next((k for k, v in self.target_options().items() if v == self.current.uuid), None)
+        old = self.x_tgt.get()
+        if not new or not old:
+            return
+        if self.source_options().get(self.x_src.get()) == ("profile", self.current.uuid):
+            if self.target_options().get(old) in (None, "all"):
+                old = next((self.plabel(p.uuid) for p in self.profiles if p.uuid != self.current.uuid), "")
+            self.x_src.set(old)
+        self.x_tgt.set(new)
+
     def pick_source(self, text):
         ref = self.source_options().get(text)
         if ref and ref[0] == "open":
             path, _ = QFileDialog.getOpenFileName(self, "Open a settings file", "", "Settings file (*.ini);;All files (*.*)")
-            if not path:
+            ref = self.add_file_source(path) if path else None
+            if not ref:
                 self.x_src.set(self._x_src_last)
                 return
-            ref = self.add_extra_source("file", Path(path))
             self.x_src.set_values(list(self.source_options()))
             self.x_src.set(next(k for k, v in self.source_options().items() if v == ref))
         self.refresh_transfer(rebuild_menus=False, clear=True)
@@ -3246,7 +3708,7 @@ class App(QMainWindow):
     def swap_transfer(self):
         src = self.source_options().get(self.x_src.get())
         tgt = self.target_options().get(self.x_tgt.get())
-        if not src or src[0] != "profile" or not tgt:
+        if not src or src[0] != "profile" or not tgt or tgt == "all":
             self.toast("Swap works when both sides are profiles.", "info")
             return
         self.start_transfer(("profile", tgt), src[1])
@@ -3277,44 +3739,66 @@ class App(QMainWindow):
             if self.x_tgt.get() not in tgt_opts:
                 cur = next((k for k, v in self.target_options().items() if self.current and v == self.current.uuid), None)
                 self.x_tgt.set(cur or (tgt_opts[0] if tgt_opts else ""))
-        self._x_src_last = self.x_src.get()
+        src_text, tgt_text = self.x_src.get(), self.x_tgt.get()
+        # A new source starts with no ticks. A preset ticks what differs, again for each new target.
+        clear = clear or src_text != self._x_src_last
+        retick = clear or tgt_text != self._x_tgt_last
+        self._x_src_last, self._x_tgt_last = src_text, tgt_text
         if clear:
             self.x_sel = set()
         clear_layout(self.x_lay)
-        self.x_rows, self.x_vars, self.x_groups = {}, {}, []
-        src_ref = self.source_options().get(self.x_src.get())
-        tgt_uuid = self.target_options().get(self.x_tgt.get())
-        self.x_delpreset.setVisible(bool(src_ref and src_ref[0] == "preset"))
-        if not src_ref or not tgt_uuid or src_ref[0] == "open":
+        self.x_rows, self.x_vars, self.x_groups, self.x_same, self.x_summary = {}, {}, [], set(), ""
+        src_ref = self.source_options().get(src_text)
+        targets = self.x_targets = self.transfer_targets(src_ref)
+        preset = bool(src_ref and src_ref[0] == "preset")
+        self.x_delpreset.setVisible(preset)
+        if not src_ref or not targets or src_ref[0] == "open":
             self.update_transfer_count()
             return
-        if src_ref == ("profile", tgt_uuid):
+        if src_ref[0] == "profile" and src_ref[1] in {t.uuid for t in targets}:
             self.transfer_message("Pick two different profiles.")
             self.x_lay.addStretch()
             self.update_transfer_count()
             return
         try:
             src = self.source_values(src_ref)
-            tgt = IniFile.load(self.profile_by_uuid(tgt_uuid).path).values()
+            tgts = [IniFile.load(t.path) for t in targets]
         except (OSError, AttributeError) as e:
-            self.transfer_message(f"Could not read the files.\n{e}", "bad")
+            gone = src_ref[0] == "backup" and not Path(src_ref[1]).exists()
+            self.transfer_message("This backup no longer exists." if gone else f"Could not read the files.\n{e}", "bad")
             self.x_lay.addStretch()
+            self.update_transfer_count()
             return
         diff_only, include_hw = self.x_diff.isChecked(), self.x_hw.isChecked()
-        grouped = defaultdict(list)
-        total_diff = 0
-        for k in src:
+        now = [t.values() for t in tgts]
+        # Keys of a file in sections that no target has are left out, so a benchmark report adds no keys.
+        secs = set().union(*(t.sections for t in tgts))
+        grouped, differ = defaultdict(list), set()
+        total_diff = hw_diff = 0
+        for k, sv in src.items():
+            if src_ref[0] == "file" and k[0] not in secs:
+                continue
             spec = self.spec(*k)
+            tv = [vals.get(k) for vals in now]
+            same = all(v == sv for v in tv)
+            if same:
+                self.x_same.add(k)
             if spec.hw and not include_hw:
+                hw_diff += not same
                 continue
-            same = src[k] == tgt.get(k)
             total_diff += not same
-            if diff_only and same:
+            if not same:
+                differ.add(k)
+            elif diff_only and not preset:
                 continue
-            grouped[spec.cat].append((spec, k, src[k], tgt.get(k)))
-        self.x_sel &= {k for rows in grouped.values() for _, k, _, _ in rows}
+            grouped[spec.cat].append((spec, k, sv, tv))
+        if preset and retick:
+            self.x_sel = differ
         if not grouped:
-            self.transfer_message("Nothing to transfer. The shown settings already match.")
+            self.transfer_message(f"Only hardware keys differ ({hw_diff}). Turn on Hardware keys to see them." if hw_diff
+                                  else "Nothing to transfer. The shown settings already match.")
+        else:
+            self.transfer_header(src_text, targets)
         for cat in CATEGORIES:
             rows = sorted(grouped.get(cat, []), key=lambda r: RANK.get(r[1], 1e9))
             if not rows:
@@ -3338,6 +3822,7 @@ class App(QMainWindow):
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(4)
             for i, (spec, k, sv, tv) in enumerate(rows):
+                same = k in self.x_same
                 chk = Check("", 20)
                 chk.setChecked(k in self.x_sel)
                 chk.clicked.connect(lambda *_, k=k, chk=chk: self.toggle_row(k, chk.isChecked()))
@@ -3348,25 +3833,54 @@ class App(QMainWindow):
                 name.setLayout(nl)
                 nl.addWidget(label("Resolution width" if spec.kind == "resolution" else spec.label))
                 nl.addWidget(label(spec.path, "tiny_mono", "faint"))
-                src_label = label(spec.show(sv), "mono", "muted" if sv == tv else "accent")
+                src_label = label(spec.show(sv), "mono", "muted" if same else "accent")
                 src_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                mark = label("=" if same else "→", tone="faint", width=16)
+                mark.setAlignment(Qt.AlignCenter)
                 grid.addWidget(chk, i, 0)
                 grid.addWidget(name, i, 1)
                 grid.addWidget(src_label, i, 2)
-                grid.addWidget(label("→", tone="faint"), i, 3)
-                grid.addWidget(label(spec.show(tv) if tv is not None else "new key", "mono",
-                                     "muted" if tv is not None else "ok"), i, 4)
+                grid.addWidget(mark, i, 3)
+                grid.addWidget(self.target_value(spec, tv, targets), i, 4)
         self.x_lay.addStretch()
         hidden = "" if include_hw else "  Hardware keys are hidden."
-        self.x_summary = f"{total_diff} difference{'s' if total_diff != 1 else ''}.{hidden}"
+        self.x_summary = f"{plural(total_diff, 'difference')}.{hidden}"
         self.update_transfer_count()
+
+    def target_value(self, spec, tv, targets):
+        # Several targets show their value when they agree, or "varies" with each value in the tooltip.
+        if len(set(tv)) > 1:
+            w = label("varies", "mono", "muted")
+            w.setToolTip("\n".join(f"{self.store.name(t.uuid)}: {spec.show(v)}" for t, v in zip(targets, tv)))
+            return w
+        return label(spec.show(tv[0]) if tv[0] is not None else "new key", "mono", "muted" if tv[0] is not None else "ok")
+
+    def transfer_header(self, src_text, targets):
+        # One line names the value columns. Its grid matches the cards below.
+        head = QWidget()
+        grid = QGridLayout(head)
+        grid.setContentsMargins(14, 10, 14, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnMinimumWidth(2, 200)
+        grid.setColumnMinimumWidth(4, 200)
+        # The grid adds spacing only around columns that hold a widget.
+        grid.addWidget(label(width=20), 0, 0)
+        grid.addWidget(label(width=16), 0, 3)
+        fm = QFontMetrics(F.small)
+        name = self.store.name(targets[0].uuid) if len(targets) == 1 else "Other profiles"
+        src = label(fm.elidedText(src_text.split("  (")[0], Qt.ElideRight, 200), "small", "muted")
+        src.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        grid.addWidget(src, 0, 2)
+        grid.addWidget(label(fm.elidedText(f"{name} now", Qt.ElideRight, 200), "small", "muted"), 0, 4)
+        self.x_lay.addWidget(head)
 
     def toggle_row(self, k, on):
         (self.x_sel.add if on else self.x_sel.discard)(k)
         self.sync_checks()
 
     def select_rows(self, keys):
-        self.x_sel = set(keys) & set(self.x_rows)
+        self.x_sel = set(keys)
         self.sync_checks()
 
     def sync_checks(self):
@@ -3377,38 +3891,79 @@ class App(QMainWindow):
         self.update_transfer_count()
 
     def update_transfer_count(self):
-        n = len(self.x_sel)
+        # Only ticked rows that are shown count. Ticks of hidden rows stay for when the rows show again.
+        n = len(self.x_sel & self.x_rows.keys())
         self.x_count.setText(f"{n} selected   ·   {self.x_summary}" if self.x_rows else self.x_summary)
         restyle(self.x_count, tone="accent" if n else "muted")
         tgt = self.x_tgt.get().split("  (")[0]
-        self.x_apply.setText(f"Apply to {tgt[:22]}" if tgt else "Apply to target")
+        if len(self.x_targets) > 1:
+            self.x_apply.setText(f"Apply to {plural(len(self.x_targets), 'profile')}")
+        else:
+            self.x_apply.setText(f"Apply to {tgt[:22]}" if tgt else "Apply to target")
         self.x_apply.setEnabled(bool(n) and not self.running)
         self.x_preset.setEnabled(bool(n))
 
     def apply_transfer(self):
         keys = [k for k in self.x_rows if k in self.x_sel]
         src_ref = self.source_options().get(self.x_src.get())
-        target = self.profile_by_uuid(self.target_options().get(self.x_tgt.get()))
-        if not keys or not src_ref or not target or self.blocked():
+        targets = list(self.x_targets)
+        if not keys or not src_ref or not targets or self.blocked():
             return
-        if self.current and target.uuid == self.current.uuid and self.pending:
-            show_msg(self, "info", "This profile has unsaved edits in the Settings tab. Save or revert them first.")
+        cur = self.current.uuid if self.current else None
+        if self.pending and cur in {t.uuid for t in targets}:
+            show_msg(self, "info", f"{self.store.name(cur)} has unsaved edits in the Settings tab. Save or revert them first.")
             return
         src_name = self.x_src.get().split("  (")[0]
-        if not ask_yes_no(self, f"Copy {len(keys)} setting{'s' if len(keys) != 1 else ''} from {src_name} to "
-                                f"{self.store.name(target.uuid)}?\n\nA backup of the target is saved first."):
-            return
         try:
             src = self.source_values(src_ref)
-            ini = IniFile.load(target.path)
-            for k in keys:
-                ini.set(*k, src[k])
-            write_profile(self.store, target, ini, f"before transfer from {src_name}")
-        except OSError as e:
-            show_msg(self, "error", f"The transfer failed. The target was not changed.\n\n{e}")
+        except (OSError, AttributeError) as e:
+            show_msg(self, "error", f"Could not read {src_name}.\n\n{e}")
             return
-        self.toast(f"Copied {len(keys)} settings to {self.store.name(target.uuid)}. A backup was saved.")
-        if self.current and target.uuid == self.current.uuid:
+        changes, failed = {}, []
+        for t in targets:
+            try:
+                ini = IniFile.load(t.path)
+            except OSError as e:
+                failed.append((self.store.name(t.uuid), e))
+                continue
+            changes[t.uuid] = sum(ini.get(*k) != src[k] for k in keys)
+        changing = [t for t in targets if changes.get(t.uuid)]
+        same = [self.store.name(t.uuid) for t in targets if changes.get(t.uuid) == 0]
+        if len(changing) == 1 and len(targets) == 1:
+            text = f"Copy {plural(changes[changing[0].uuid], 'setting')} from {src_name} to " \
+                   f"{self.store.name(changing[0].uuid)}?\n\nA backup of the target is saved first."
+        elif changing:
+            lines = "\n".join(f"{self.store.name(t.uuid)}: {plural(changes[t.uuid], 'change')}" for t in changing)
+            if same:
+                lines += f"\n{', '.join(same)} already {'has' if len(same) == 1 else 'have'} these values."
+            text = f"Copy {plural(len(keys), 'setting')} from {src_name} to {plural(len(changing), 'profile')}?\n\n" \
+                   f"{lines}\n\nA backup of each profile is saved first."
+        if changing and not ask_yes_no(self, text):
+            return
+        done = []
+        for t in changing:
+            try:
+                ini = IniFile.load(t.path)
+                for k in keys:
+                    ini.set(*k, src[k])
+                write_profile(self.store, t, ini, f"transfer from {src_name}")
+                done.append(t)
+            except OSError as e:
+                failed.append((self.store.name(t.uuid), e))
+        if failed:
+            show_msg(self, "error", "\n\n".join(f"Could not update {n}. It was not changed.\n{e}" for n, e in failed))
+        parts = []
+        if done:
+            n = changes[done[0].uuid] if len(done) == 1 else len(keys)
+            parts.append(f"Copied {plural(n, 'setting')} to {', '.join(self.store.name(t.uuid) for t in done)}. "
+                         + ("A backup was saved." if len(done) == 1 else "Backups were saved."))
+        if same:
+            parts.append(f"{', '.join(same)} already {'has' if len(same) == 1 else 'have'} these values.")
+        if parts:
+            self.toast(" ".join(parts), "ok" if done else "info")
+        if not done:
+            return
+        if cur in {t.uuid for t in done}:
             self.reload_current()
             self.tabs.set("Transfer")
         self.render_sidebar()
@@ -3416,25 +3971,35 @@ class App(QMainWindow):
         self.refresh_transfer(rebuild_menus=False, clear=True)
 
     def save_preset(self):
-        keys = [k for k in self.x_rows if k in self.x_sel]
+        picked = [k for k in self.x_rows if k in self.x_sel]
         src_ref = self.source_options().get(self.x_src.get())
-        if not keys or not src_ref:
+        if not picked or not src_ref:
             return
-        name = ask_text(self, "Save preset", "Name for this preset, for example Sens only").strip()
+        try:
+            src = self.source_values(src_ref)
+        except (OSError, AttributeError) as e:
+            show_msg(self, "error", f"Could not read the source.\n\n{e}")
+            return
+        # Resolution width and height are saved together.
+        pair = ("ResolutionWidth", "ResolutionHeight")
+        keys = list(dict.fromkeys(x for k in picked for x in ([(k[0], p) for p in pair] if k[1] in pair else [k])
+                                  if x in src))
+        total = plural(len(keys), "setting")
+        name = (ask_text(self, "Save preset", f"Saves {total}.\n\nName for this preset, for example Sens only") or "").strip()
         if not name:
             return
         presets = self.store.data["presets"]
         if name in presets and not ask_yes_no(self, f'Replace the preset "{name}"?'):
             return
-        src = self.source_values(src_ref)
         values = {}
         for sec, key in keys:
             values.setdefault(sec, {})[key] = src[(sec, key)]
         presets[name] = {"values": values, "created": datetime.now().isoformat(timespec="seconds"),
                          "source": self.x_src.get()}
         self.store.save()
+        self.x_sel = set()
         self.refresh_transfer()
-        self.toast(f'Preset "{name}" saved with {len(keys)} settings. Pick it in From to apply it.')
+        self.toast(f'Preset "{name}" saved with {total}. Pick it in From to apply it.')
 
     def delete_preset(self):
         ref = self.source_options().get(self.x_src.get())
@@ -3455,10 +4020,11 @@ class App(QMainWindow):
         page.setLayout(v)
         top = hbox(12, (6, 2, 0, 0))
         top.addWidget(label(f"Backups of {self.store.name(p.uuid)}", "h2"))
-        note = label(f"The app saves one before every change and keeps the last {MAX_BACKUPS}.", "small", "faint")
+        note = label(f"A copy is saved before and after every change. The newest {MAX_BACKUPS} stay, plus kept ones.",
+                     "small", "faint")
         note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         top.addWidget(note, 1)
-        top.addWidget(button("Back up now", lambda: (self.backup_now(), self.refresh_backups())))
+        top.addWidget(button("Back up now", lambda: self.backup_now() and self.refresh_backups()))
         top.addWidget(button("Open folder", lambda: (self.store.backup_dir(p.uuid).mkdir(parents=True, exist_ok=True),
                                                      self.open_path(self.store.backup_dir(p.uuid)))))
         v.addLayout(top)
@@ -3482,33 +4048,61 @@ class App(QMainWindow):
                 vals = IniFile.load(b.path).values()
             except OSError:
                 continue
-            n = sum(1 for k in set(vals) | set(cur) if vals.get(k) != cur.get(k))
+            n, hw = self.diff_counts(vals, cur)
             row = Card(COL["card"], 10)
             rl = hbox(8, (14, 8, 12, 8))
             row.setLayout(rl)
             rl.addWidget(label(nice_date(b.when), "bold", width=190))
-            rl.addWidget(label(b.reason, tone="muted"), 1)
-            diff = label(f"{n} difference{'s' if n != 1 else ''}" if n else "same as current", "small",
-                         "accent" if n else "faint", width=110)
-            diff.setAlignment(Qt.AlignCenter)
-            rl.addWidget(diff)
-            rl.addWidget(button("Compare", lambda b=b: self.start_transfer(
-                self.add_extra_source("backup", b.path, f"Backup: {nice_date(b.when)}"), p.uuid), width=80))
+            what = hbox(8)
+            kept = Pill("KEPT", COL["accent_dim"], COL["accent"])
+            kept.setVisible(b.keep)
+            what.addWidget(kept)
+            what.addWidget(label(b.reason, tone="muted", wrap=True), 1)
+            rl.addLayout(what, 1)
+            counts = vbox(0)
+            for text, tone in ((plural(n, "difference") if n else "same settings", "accent" if n else "faint"),
+                               (f"+{hw} hardware" if hw else "", "faint")):
+                if text:
+                    diff = label(text, "small", tone, width=110)
+                    diff.setAlignment(Qt.AlignCenter)
+                    counts.addWidget(diff)
+            rl.addLayout(counts)
+            keep = Switch("Keep", 32, 18)
+            keep.setChecked(b.keep)
+            keep.setToolTip(f"A kept backup stays when there are more than {MAX_BACKUPS}.")
+            keep.clicked.connect(lambda *_, b=b, keep=keep, kept=kept: self.keep_backup(b, keep, kept))
+            rl.addWidget(keep)
+            rl.addWidget(button("Compare", lambda b=b: self.start_transfer(self.add_extra_source(
+                "backup", b.path, f"Backup: {nice_date(b.when)} ({b.reason})"), p.uuid), width=80))
             restore = button("Restore", lambda b=b: self.restore_backup(b), width=80)
-            restore.setEnabled(not self.running and bool(n))
+            restore.setEnabled(not self.running and vals != cur)
             rl.addWidget(restore)
-            rl.addWidget(button("Delete", lambda b=b: self.delete_backup(b), "ghost", 70))
+            rl.addWidget(button("Delete", lambda b=b, row=row: self.delete_backup(b, row), "ghost", 70))
             lst.addWidget(row)
         lst.addStretch()
+
+    def diff_counts(self, src, tgt):
+        # Keys that a restore of src over tgt changes or removes, with hardware keys apart.
+        diff = [k for k in src.keys() | tgt.keys() if src.get(k) != tgt.get(k)]
+        hw = sum(self.spec(*k).hw for k in diff)
+        return len(diff) - hw, hw
 
     def restore_backup(self, b):
         p = self.current
         if not p or self.blocked() or not self.confirm_discard():
             return
-        if not ask_yes_no(self, f"Restore the backup from {nice_date(b.when)}?\n\nThe current file is backed up first."):
+        try:
+            ini = IniFile.load(b.path)
+            n, hw = self.diff_counts(ini.values(), IniFile.load(p.path).values())
+        except OSError as e:
+            show_msg(self, "error", f"Restore failed.\n\n{e}")
+            return
+        what = " and ".join(x for x in (plural(n, "setting") if n else "", plural(hw, "hardware key") if hw else "") if x)
+        if not ask_yes_no(self, f"Restore {what or 'the backup'} from {nice_date(b.when)}?\n\n"
+                                "The current file is backed up first."):
             return
         try:
-            write_profile(self.store, p, IniFile.load(b.path), "before restore")
+            write_profile(self.store, p, ini, f"restore of {nice_date(b.when)}")
         except OSError as e:
             show_msg(self, "error", f"Restore failed.\n\n{e}")
             return
@@ -3517,9 +4111,31 @@ class App(QMainWindow):
         self.refresh_backups()
         self.toast("Backup restored.")
 
-    def delete_backup(self, b):
-        if ask_yes_no(self, f"Delete the backup from {nice_date(b.when)}?"):
+    def keep_backup(self, b, switch, pill):
+        # Keeping renames the file, so From follows it.
+        old = b.path
+        try:
+            self.store.set_keep(b, switch.isChecked())
+        except OSError as e:
+            show_msg(self, "error", f"Could not rename the backup.\n\n{e}")
+            switch.setChecked(b.keep)
+            return
+        pill.setVisible(b.keep)
+        self.update_backup_source(old, b.path)
+
+    def delete_backup(self, b, row=None):
+        if not ask_yes_no(self, f"Delete the backup from {nice_date(b.when)}?"):
+            return
+        try:
             b.path.unlink(missing_ok=True)
+        except OSError as e:
+            show_msg(self, "error", f"Could not delete the backup.\n\n{e}")
+            return
+        self.update_backup_source(b.path)
+        # Removing only the row keeps the scroll position.
+        if row is not None and self.current and self.store.backups(self.current.uuid):
+            discard(row)
+        else:
             self.refresh_backups()
 
     # benchmarks tab
@@ -3543,6 +4159,14 @@ class App(QMainWindow):
         h.addWidget(right, 1)
         self.b_title = label("", "h2", margins=(6, 4, 6, 8))
         rv.addWidget(self.b_title)
+        self.b_empty = label("", tone="muted", wrap=True, margins=(6, 0, 6, 8))
+        self.b_empty.hide()
+        rv.addWidget(self.b_empty)
+        # The run details hide as one block when the folder has no runs.
+        self.b_body = QWidget()
+        bv = vbox(0)
+        self.b_body.setLayout(bv)
+        rv.addWidget(self.b_body)
         tiles = QGridLayout()
         tiles.setSpacing(8)
         self.b_tiles = []
@@ -3550,14 +4174,17 @@ class App(QMainWindow):
             tile = Card(COL["card"], 12)
             tv = vbox(0, (14, 10, 14, 10))
             tile.setLayout(tv)
-            v, c = label("", "tile"), label("", "small", "muted")
+            v, c, d = label("", "tile"), label("", "small", "muted"), label("", "small", wrap=True)
+            d.hide()
             tv.addWidget(v)
             tv.addWidget(c)
+            tv.addWidget(d)
+            tv.addStretch()
             tiles.addWidget(tile, i // 4, i % 4)
             tiles.setColumnStretch(i % 4, 1)
-            self.b_tiles.append((v, c))
-        rv.addLayout(tiles)
-        _, cl = self.card(rv, "Frame rate over the run", margins=(8, 10, 8, 8))
+            self.b_tiles.append((v, c, d))
+        bv.addLayout(tiles)
+        _, cl = self.card(bv, "Frame rate over the run", margins=(8, 10, 8, 8))
         opts = hbox(12, (4, 0, 4, 0))
         self.b_cpu = Switch("CPU frame time", 36, 18)
         self.b_gpu = Switch("GPU frame time", 36, 18)
@@ -3565,9 +4192,9 @@ class App(QMainWindow):
             s.clicked.connect(lambda *_: self.show_bench(self.bench_sel))
             opts.addWidget(s)
         opts.addStretch()
-        self.b_cmp = Combo(["Compare with: none"], 260, 28, role="small")
+        self.b_cmp = Combo(["Compare with: none"], 300, 28, role="small")
         self.b_cmp.setCurrentIndex(0)
-        self.b_cmp.activated.connect(lambda i: self.show_bench(self.bench_sel))
+        self.b_cmp.activated.connect(self.pick_compare)
         opts.addWidget(self.b_cmp)
         cl.addLayout(opts)
         self.b_chart = LineChart()
@@ -3584,74 +4211,137 @@ class App(QMainWindow):
             info.addWidget(box, 0, col)
             boxes.append(bl)
         self.b_sys_lay, self.b_set_lay = boxes
-        rv.addSpacing(12)
-        rv.addLayout(info)
+        bv.addSpacing(12)
+        bv.addLayout(info)
         btns = hbox(8, (0, 10, 0, 0))
-        self.b_open = button("Open full report", lambda: self.bench_sel is not None and self.benches[self.bench_sel].html
-                             and self.open_path(self.benches[self.bench_sel].html))
+        self.b_open = button("Open full report", self.open_bench_report)
         btns.addWidget(self.b_open)
-        btns.addWidget(button("Open benchmark folder", lambda: self.open_path(self.root_dir / "Benchmark")))
+        btns.addWidget(button("Open benchmark folder", self.open_bench_folder))
         btns.addStretch()
         rv.addLayout(btns)
         rv.addStretch()
 
-    def refresh_bench(self):
+    def refresh_bench(self, keep=None):
+        # Shows the run from the date in keep, else the newest. Compare starts at the run before it.
+        # A report read while the game was still writing it parses empty and is read again.
+        cache = {(b.ini, b.html): b.detail for b in self.benches or [] if b.detail and len(b.detail.get("fps", ()))}
         self.benches = scan_benchmarks(self.root_dir)
+        for b in self.benches:
+            b.detail = cache.get((b.ini, b.html))
         clear_layout(self.b_list_lay)
         self.b_items = []
         if not self.benches:
-            self.b_list_lay.addWidget(label("No benchmark runs found.\nRun the benchmark from the game's graphics settings.",
-                                            "small", "muted", wrap=True, margins=(8, 20, 8, 0)))
-            self.b_list_lay.addStretch()
-            self.b_hist.plot([], None)
-            self.b_title.setText("")
+            self.clear_bench()
             return
+        self.b_empty.hide()
+        self.b_body.show()
         for i in range(len(self.benches) - 1, -1, -1):
             item = BenchItem(self.benches[i], lambda i=i: self.show_bench(i))
             self.b_list_lay.addWidget(item)
             self.b_items.append((i, item))
         self.b_list_lay.addStretch()
-        self.b_cmp.set_values(["Compare with: none"] + [f"Compare with: {nice_date(b.when)}" for b in reversed(self.benches)])
-        if self.b_cmp.currentIndex() < 0:
-            self.b_cmp.setCurrentIndex(0)
-        self.show_bench(len(self.benches) - 1)
+        self.b_cmp.set_values(["Compare with: none"] + [f"Compare with: {nice_date(b.when)}"
+                                                        + (f" · {b.stats['Fps']:.0f} fps" if b.stats.get("Fps") else "")
+                                                        for b in reversed(self.benches)])
+        self.b_cmp.setEnabled(True)
+        i = next((j for j, b in enumerate(self.benches) if b.when == keep), len(self.benches) - 1)
+        self.b_cmp_i = i - 1 if i else None
+        self.show_bench(i)
+
+    def clear_bench(self):
+        self.bench_sel = self.b_cmp_i = None
+        for tile in self.b_tiles:
+            for w in tile:
+                w.setText("")
+        self.b_hist.plot([], None)
+        self.b_chart.plot([], None, "")
+        clear_layout(self.b_sys_lay)
+        clear_layout(self.b_set_lay)
+        self.b_cmp.set_values(["Compare with: none"])
+        self.b_cmp.setCurrentIndex(0)
+        self.b_cmp.setEnabled(False)
+        self.b_open.setEnabled(False)
+        self.b_title.setText("No benchmark runs")
+        self.b_empty.setText(f"The game saves its benchmark reports in {soft(self.root_dir / 'Benchmark')}. To make a run, "
+                             "start the benchmark from the game's graphics settings. New runs show here on their own.")
+        self.b_body.hide()
+        self.b_empty.show()
 
     def bench_detail(self, b):
         if b.detail is None:
             try:
                 b.detail = parse_bench_html(b.html) if b.html else {}
-            except OSError:
+            except (OSError, ValueError):
                 b.detail = {}
         return b.detail
 
+    def bench_figures(self, b):
+        # Values for BENCH_TILES. The CPU and GPU frame times are the means of the report's series.
+        d = self.bench_detail(b)
+        s, x = b.stats, d.get("extra", {})
+        fps, cpu, gpu = (d.get(k, np.array([])) for k in ("fps", "cpu", "gpu"))
+        return [(s.get("Fps"),), (float(np.percentile(fps, 1)) if fps.size else None,), (s.get("LowestFps"),),
+                (s.get("HighestFps"),), (s.get("RawFrameTimes"),),
+                (float(np.mean(cpu)) if cpu.size else None, float(np.mean(gpu)) if gpu.size else None),
+                (x.get("gpu_load"),), (x.get("gpu_temperature"),)]
+
+    def pick_compare(self, k):
+        # The rows after "none" list the runs newest first.
+        if self.benches:
+            self.b_cmp_i = len(self.benches) - k if k else None
+            self.show_bench(self.bench_sel)
+
     def show_bench(self, i):
-        if not self.benches or i is None:
+        if not self.benches or i is None or not 0 <= i < len(self.benches):
             return
+        if self.b_cmp_i is not None and not 0 <= self.b_cmp_i < len(self.benches):
+            self.b_cmp_i = None
+        if self.b_cmp_i == i:
+            # Picking the compared run moves the compare to the run before it.
+            self.b_cmp_i = i - 1 if i else None
         self.bench_sel = i
         b = self.benches[i]
+        other = self.benches[self.b_cmp_i] if self.b_cmp_i is not None else None
+        self.b_cmp.setCurrentIndex(len(self.benches) - self.b_cmp_i if other else 0)
         d = self.bench_detail(b)
         s, x = b.stats, d.get("extra", {})
         fps = d.get("fps", np.array([]))
-        p1 = float(np.percentile(fps, 1)) if fps.size else None
         self.b_title.setText(f"Run from {nice_date(b.when)}")
 
-        def f(v, fmt):
-            return fmt.format(v) if v is not None else "n/a"
+        def text(vals, digits, unit):
+            if all(v is None for v in vals):
+                return "n/a"
+            return " / ".join("n/a" if v is None else f"{v:.{digits}f}" for v in vals) + unit
 
-        tiles = [(f(s.get("Fps"), "{:.0f}"), "average fps"), (f(p1, "{:.0f}"), "1st percentile of sampled fps"),
-                 (f(s.get("LowestFps"), "{:.0f}"), "lowest fps"), (f(s.get("HighestFps"), "{:.0f}"), "highest fps"),
-                 (f(s.get("RawFrameTimes"), "{:.1f} s"), "duration"), (f(s.get("RawFrameCounts"), "{:,.0f}"), "frames"),
-                 (f(x.get("gpu_load"), "{:.0f}%"), "GPU load"), (f(x.get("gpu_temperature"), "{:.0f} °C"), "GPU temperature")]
-        for (vl, cl), (v, c) in zip(self.b_tiles, tiles):
-            vl.setText(v)
-            cl.setText(c)
+        def delta(vals, ovals, digits, unit, better):
+            # The difference of the shown values, so "same" never sits beside two different numbers.
+            parts, signs = [], set()
+            for v, o in zip(vals, ovals):
+                dv = None if v is None or o is None else round(v, digits) - round(o, digits)
+                if dv is None or abs(dv) < 0.5 / 10 ** digits:
+                    parts.append("n/a" if dv is None else "same")
+                else:
+                    parts.append(f"{dv:+.{digits}f}")
+                    signs.add((dv > 0) == (better > 0))
+            diff = parts[0] if len(set(parts)) == 1 and parts[0] in ("n/a", "same") else " / ".join(parts)
+            tone = "ok" if better and signs == {True} else "bad" if better and signs == {False} else "muted"
+            return f"vs {text(ovals, digits, unit)} · {diff}", tone
+
+        figs = self.bench_figures(b)
+        ofigs = self.bench_figures(other) if other else None
+        for k, ((vl, cl, dl), (digits, unit, caption, better)) in enumerate(zip(self.b_tiles, BENCH_TILES)):
+            vl.setText(text(figs[k], digits, unit))
+            cl.setText(caption)
+            if other:
+                t, tone = delta(figs[k], ofigs[k], digits, unit, better)
+                dl.setText(t)
+                restyle(dl, tone=tone)
+            dl.setVisible(other is not None)
         series = [{"y": fps, "color": COL["accent"], "label": "FPS", "unit": " fps", "axis": "l", "width": 2}]
-        cmp_label = self.b_cmp.get().removeprefix("Compare with: ")
-        other = next((o for o in self.benches if nice_date(o.when) == cmp_label and o is not b), None)
         if other:
             ofps = self.bench_detail(other).get("fps", np.array([]))
-            series.append({"y": ofps, "color": COL["info"], "label": f"FPS {cmp_label}", "unit": " fps", "axis": "l",
-                           "width": 1.5, "dash": (4, 3)})
+            series.append({"y": ofps, "color": COL["info"], "label": f"FPS {nice_date(other.when)}", "unit": " fps",
+                           "axis": "l", "width": 1.5, "dash": (4, 3)})
         if self.b_cpu.isChecked():
             series.append({"y": d.get("cpu", np.array([])), "color": COL["ok"], "label": "CPU ms", "unit": " ms", "axis": "r", "width": 1.5})
         if self.b_gpu.isChecked():
@@ -3665,24 +4355,104 @@ class App(QMainWindow):
         if s.get("LoadingTime") is not None:
             rows.append(("loading time", f"{s['LoadingTime']:,.0f} (unit not documented, likely ms)"))
         self.fill_kv(self.b_sys_lay, "System", [(k.replace("_", " ").upper() if len(k) <= 4 else k.capitalize(), v) for k, v in rows])
-        self.fill_kv(self.b_set_lay, "Settings used", d.get("settings", []) or [("", "Open the full report for details.")])
+        self.fill_kv(self.b_set_lay, *self.bench_settings(b, other))
         self.b_open.setEnabled(bool(b.html))
-        self.b_hist.plot([(nice_date(o.when), o.stats.get("Fps")) for o in self.benches], i)
+        self.b_hist.plot([(nice_date(o.when), o.stats.get("Fps")) for o in self.benches], i, self.b_cmp_i)
         for j, item in self.b_items:
             item.set_selected(j == i)
 
+    def bench_settings(self, b, other):
+        # Rows that differ from the compare run read "old → new" by run date.
+        mine = [(k, v.strip()) for k, v in self.bench_detail(b).get("settings", [])]
+        theirs = dict((k, v.strip()) for k, v in self.bench_detail(other).get("settings", [])) if other else {}
+        if not mine:
+            return "Settings used", [("", "Open the full report for details.")]
+        if not theirs:
+            return "Settings used", mine
+        rows, n, ours = [], 0, dict(mine)
+        for k in list(ours) + [k for k in theirs if k not in ours]:
+            a, c = ours.get(k), theirs.get(k)
+            if a == c:
+                rows.append((k, a))
+                continue
+            n += 1
+            old, new = (c, a) if b.when > other.when else (a, c)
+            rows.append((k, f"{old or 'not recorded'} → {new or 'not recorded'}", "accent"))
+        when = nice_date(other.when)
+        return (f"Settings used · {n} {'differs' if n == 1 else 'differ'} from {when}" if n
+                else f"Same recorded settings as {when}"), rows
+
     def fill_kv(self, lay, title, rows):
+        # A row may add a tone for its value.
         clear_layout(lay)
-        lay.addWidget(label(title.upper(), "caps", "faint", margins=(0, 0, 0, 4)))
+        lay.addWidget(label(title.upper(), "caps", "faint", wrap=True, margins=(0, 0, 0, 4)))
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(5)
         grid.setColumnStretch(1, 1)
-        for i, (k, v) in enumerate(rows):
-            grid.addWidget(label(k, "small", "muted", width=120), i, 0, Qt.AlignTop)
-            grid.addWidget(label(v.strip(), "small", wrap=True), i, 1)
+        grid.setColumnMinimumWidth(0, 120)
+        for i, (k, v, *tone) in enumerate(rows):
+            grid.addWidget(label(k, "small", "muted"), i, 0, Qt.AlignTop)
+            grid.addWidget(label(v.strip(), "small", *tone, wrap=True), i, 1)
         lay.addLayout(grid)
         lay.addStretch()
+
+    def open_bench_report(self):
+        i, benches = self.bench_sel, self.benches or []
+        if i is not None and i < len(benches) and benches[i].html:
+            self.open_path(benches[i].html)
+
+    def open_bench_folder(self):
+        folder = self.root_dir / "Benchmark"
+        self.open_path(folder if folder.is_dir() else self.root_dir)
+
+    def watch_bench(self):
+        # Runs on its own timer. A new run is read once its HTML report exists, or after 3 s.
+        folder = self.root_dir / "Benchmark"
+        names = bench_names(folder)
+        if folder != self._bench_dir:
+            self._bench_dir, self._bench_names, self._bench_wait = folder, names, {}
+            return
+        if names.keys() == self._bench_names.keys() and not self._bench_wait:
+            return
+        now = time.monotonic()
+        added = names.keys() - self._bench_names.keys()
+        for n in added:
+            if names[n][1] == "ini" and n not in self._bench_wait:
+                self._bench_wait[n] = now
+                QTimer.singleShot(3050, self.watch_bench)
+        htmls = [(t, n) for n, (t, kind) in names.items() if kind == "html"]
+        for n, t0 in list(self._bench_wait.items()):
+            if n not in names or bench_html(names[n][0], htmls) or now - t0 >= 3:
+                del self._bench_wait[n]
+        if self._bench_wait:
+            return
+        self._bench_names = names
+        self.bench_arrived({n for n in added if names[n][1] == "ini"})
+
+    def bench_arrived(self, new):
+        benches = scan_benchmarks(self.root_dir)
+        runs = [j for j, b in enumerate(benches) if b.ini.name in new]
+        if self.tabs.get() == "Benchmarks":
+            sel = self.benches[self.bench_sel] if self.benches and self.bench_sel is not None else None
+            newest = bool(runs) and runs[-1] == len(benches) - 1
+            self.refresh_bench(None if newest or sel is None else sel.when)
+        else:
+            self.benches = None
+        if not runs:
+            return
+        j = runs[-1]
+        fps, prev = benches[j].stats.get("Fps"), benches[j - 1].stats.get("Fps") if j else None
+        head = "New benchmark run" if len(runs) == 1 else f"{len(runs)} new benchmark runs, the newest"
+        if not fps:
+            text = f"{head} from {nice_date(benches[j].when)}."
+        elif not prev:
+            text = f"{head}: {fps:.0f} fps."
+        else:
+            pct = (fps - prev) / prev * 100
+            than = "the same as" if round(pct, 1) == 0 else f"{abs(pct):.1f}% {'more' if pct > 0 else 'less'} than"
+            text = f"{head}: {fps:.0f} fps, {than} the previous run."
+        self.toast(text, "info")
 
     # tabs, polling, close
 
@@ -3694,6 +4464,7 @@ class App(QMainWindow):
             {"Profile": self.build_profile_tab, "Transfer": self.refresh_transfer, "Backups": self.refresh_backups}[name]()
         if name == "Benchmarks" and self.benches is None:
             self.refresh_bench()
+        QTimer.singleShot(0, self.place_toast)
 
     def set_running(self, running, force=False):
         if running == self.running and not force:
@@ -3730,8 +4501,10 @@ class App(QMainWindow):
             m = self.current.mtime
             if m != self.file_mtime:
                 self.file_mtime = m
+                self.commit_focus()
+                self.backup_disk_copy()
                 if self.pending:
-                    self.toast("The settings file changed on disk. Saving applies your edits on top of the new file.", "info")
+                    self.merge_outside_change()
                 else:
                     self.reload_current()
                     self.toast("The settings file changed on disk and was reloaded.", "info")
@@ -3742,6 +4515,7 @@ class App(QMainWindow):
             e.ignore()
             return
         self.poll_timer.stop()
+        self.bench_timer.stop()
         self.store.data["settings"]["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         try:
             self.store.save()
