@@ -10,33 +10,33 @@ uv run r6_siege_settings_manager.py
 
 ## Settings
 
-Settings are grouped like the game menu, with a control for each kind of value. Values that the game stores as an index, such as render scaling and sharpness, are shown in the game's own units. Search accepts the words players use, such as "fullscreen" or "fps cap", and Ctrl+Z undoes each change, including a whole resolution pick or Revert all.
+Settings are grouped like the game menu, with a control for each kind of value. Values that the game stores as an index, such as render scaling and sharpness, are shown in the game's own units. Search accepts the words players use, such as "fullscreen" or "fps cap", and a **Modified only** toggle filters down to unsaved changes. `Ctrl+Z` and `Ctrl+Y` (`Ctrl+Shift+Z`) undo and redo each change, including a whole resolution pick or Revert all.
 
 ![Graphics settings](docs/settings.png)
 
-Keys that the game menu does not offer, such as the sensitivity multiplier, are marked. The Mouse page has a sensitivity calculator that shows cm/360 for your DPI and can change the multiplier without changing your feel.
+Keys that the game menu does not offer, such as the sensitivity multiplier, are marked. The Mouse page has a sensitivity calculator that shows cm/360 and eDPI for your DPI, copies your readout to the clipboard, and can change the multiplier without changing your feel.
 
 ![Mouse settings](docs/mouse.png)
 
 ## Profiles and transfer
 
-Give each profile ID a label, a color and tags. To find out which account a profile ID belongs to, open it on R6 Tracker or stats.cc.
+Give each profile ID a label, a color and tags, and sort the sidebar by ID, name, or most recently saved. To find out which account a profile ID belongs to, open it on R6 Tracker or stats.cc.
 
 ![Profile page](docs/profile.png)
 
-Copy settings from another profile, a preset, a backup or an `.ini` file to one profile or to all other profiles. You pick each key. Hardware keys are hidden by default.
+Copy settings from another profile, a preset, a backup or an `.ini` file to one profile or to all other profiles. Filter settings by name or synonym (`Ctrl+F`), invert or clear selections, and save, rename, or delete presets. Hardware keys are hidden by default.
 
 ![Transfer page](docs/transfer.png)
 
 ## Benchmarks
 
-The Benchmarks tab reads the reports of the game's built-in benchmark, with frame rate and CPU and GPU frame times. Each run is compared with the previous one, with the difference in every figure and in the recorded settings. New runs appear while the app is open.
+The Benchmarks tab reads the reports of the game's built-in benchmark (paired `.ini` + `.html` or standalone `.html` reports), with frame rate, CPU and GPU frame times, CPU load, and total frames. Each run is compared with the previous one, with the difference in every figure and in the recorded settings, and you can copy a formatted run summary to the clipboard. New runs appear while the app is open.
 
 ![Benchmarks page](docs/benchmarks.png)
 
 ## Safety
 
-- Backups hold every version the app saves, and the file as it was before the game or another program changed it. You can restore any backup, and named backups are kept until you delete them.
+- Backups hold every version the app saves, and the file as it was before the game or another program changed it. You can filter backups (`Ctrl+F`), rename their notes, export copies, and restore any backup; kept backups stay until you delete them.
 - If the game rewrites the file while you have unsaved edits, the edits are kept and the app names any setting that both changed.
 - A read-only lock stops the game from overwriting the file.
 - Saving is blocked while Siege runs, because the game rewrites the file when it exits.
