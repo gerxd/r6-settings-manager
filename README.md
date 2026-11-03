@@ -43,6 +43,10 @@ The Benchmarks tab reads the reports of the game's built-in benchmark (paired `.
 
 Labels, presets and backups are stored in `%APPDATA%\R6SiegeSettingsManager`.
 
+## Updates and shortcut
+
+The exe checks GitHub for a new release at most once a day, and the menu next to the app name has Check for updates and a switch for the automatic check. Update downloads the new exe, checks its size and SHA-256, and replaces the running file under the same name, so a desktop shortcut made from the same menu keeps working.
+
 ## Notes
 
 Ubisoft does not document the value encodings. Most lists and scales are checked against the game menu. The upscaler numbers for DLSS and FSR, and the FSR mode lists, are inferred, and the app says so where it applies.

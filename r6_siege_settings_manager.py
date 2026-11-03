@@ -5,6 +5,7 @@
 import argparse
 import codecs
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -23,6 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from string import Template
 from types import SimpleNamespace
+from uuid import UUID
 
 import numpy as np
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
@@ -34,7 +37,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox, QDialog
                                QStyledItemDelegate, QStyleOptionSlider, QVBoxLayout, QWidget)
 
 APP_NAME = "R6 Siege Settings Manager"
-__version__ = "0.5"
+__version__ = "0.6"
 SETTINGS_FILE = "GameSettings.ini"
 MAX_BACKUPS = 50
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -76,6 +79,129 @@ def documents_dir():
 
 DEFAULT_ROOT = documents_dir() / "My Games" / "Rainbow Six - Siege"
 APP_DIR = Path(os.environ.get("R6SM_DATA") or Path(os.environ.get("APPDATA") or Path.home()) / "R6SiegeSettingsManager")
+UPDATE_API = "https://api.github.com/repos/gerxd/r6-settings-manager/releases/latest"
+RELEASES_URL = "https://github.com/gerxd/r6-settings-manager/releases"
+UPDATE_EVERY = 24 * 3600
+USER_AGENT = f"R6SiegeSettingsManager/{__version__}"
+
+
+def frozen_exe():
+    return Path(sys.executable) if getattr(sys, "frozen", False) else None
+
+
+def version_tuple(text):
+    # "v0.10" becomes (0, 10), so it sorts after "v0.9". Trailing zeros are dropped, so 0.6 equals 0.6.0.
+    parts = [int(x) for x in re.findall(r"\d+", str(text or ""))]
+    if not parts:
+        raise ValueError(f"no version in {text!r}")
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def fetch_latest(timeout=5):
+    # Returns the newest published release. GitHub leaves drafts and prereleases out of releases/latest.
+    req = urllib.request.Request(UPDATE_API, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("tag_name"), str) or data.get("draft") or data.get("prerelease"):
+        raise ValueError("unexpected release data")
+    version = data["tag_name"].lstrip("vV")
+    exes = [a for a in data.get("assets") or [] if isinstance(a, dict) and str(a.get("name", "")).lower().endswith(".exe")]
+    named = [a for a in exes if a.get("name") == f"R6-Siege-Settings-Manager-{version}.exe"]
+    asset = (named or exes or [None])[0]
+    return SimpleNamespace(version=version, key=version_tuple(version), url=data.get("html_url") or RELEASES_URL,
+                           asset=asset and SimpleNamespace(name=asset["name"], url=asset.get("browser_download_url"),
+                                                           size=asset.get("size"), digest=asset.get("digest")))
+
+
+def download_asset(asset, dest, progress=None, timeout=30):
+    # Writes the file to dest and checks its size and, when GitHub gives one, its SHA-256. A bad file is deleted.
+    req = urllib.request.Request(asset.url, headers={"User-Agent": USER_AGENT, "Accept": "application/octet-stream"})
+    h, done = hashlib.sha256(), 0
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+            while chunk := r.read(1 << 16):
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done)
+        if isinstance(asset.size, int) and done != asset.size:
+            raise ValueError(f"the download has {done} bytes, the release lists {asset.size}")
+        algo, _, want = str(asset.digest or "").partition(":")
+        if algo.lower() == "sha256" and want and h.hexdigest() != want.lower():
+            raise ValueError("the download does not match the SHA-256 of the release")
+    except BaseException:
+        Path(dest).unlink(missing_ok=True)
+        raise
+
+
+def swap_exe(exe, new):
+    # Windows lets a running exe be renamed but not deleted. If the second rename fails, the original goes back.
+    old = exe.with_name(exe.name + ".old")
+    old.unlink(missing_ok=True)
+    os.replace(exe, old)
+    try:
+        os.replace(new, exe)
+    except OSError:
+        os.replace(old, exe)
+        raise
+    return old
+
+
+def unswap_exe(exe):
+    # The new exe is not running yet, so the original can replace it.
+    os.replace(exe.with_name(exe.name + ".old"), exe)
+
+
+def launch_detached(exe, args=()):
+    # A onefile child must unpack its own files, so the variables that point at this process's copy are left out.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("_MEI", "_PYI"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        for k in list(env):
+            if mei.lower() in env[k].lower():
+                if k.upper() == "PATH":
+                    env[k] = os.pathsep.join(p for p in env[k].split(os.pathsep) if mei.lower() not in p.lower())
+                else:
+                    del env[k]
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return subprocess.Popen([str(exe), *args], cwd=str(exe.parent), env=env, creationflags=flags, close_fds=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def desktop_dir():
+    # The Known Folder API follows a desktop that OneDrive or a policy moved.
+    if sys.platform == "win32":
+        guid = (ctypes.c_byte * 16).from_buffer_copy(UUID("B4BFCC3A-DB2C-424C-B029-7FE99A87C641").bytes_le)
+        ptr = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(ptr)) == 0:
+            try:
+                return Path(ptr.value)
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(ptr)
+    return Path.home() / "Desktop"
+
+
+def shortcut_path():
+    return desktop_dir() / f"{APP_NAME}.lnk"
+
+
+# The paths reach PowerShell as environment variables, so no path text is ever parsed as script.
+PS_SHORTCUT = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:R6SM_LNK); "
+               "$s.TargetPath = $env:R6SM_TARGET; $s.WorkingDirectory = $env:R6SM_WORKDIR; "
+               "$s.IconLocation = $env:R6SM_ICON; $s.Description = $env:R6SM_DESC; $s.Save()")
+
+
+def make_shortcut(lnk, target):
+    env = dict(os.environ, R6SM_LNK=str(lnk), R6SM_TARGET=str(target), R6SM_WORKDIR=str(target.parent),
+               R6SM_ICON=f"{target},0", R6SM_DESC=APP_NAME)
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", PS_SHORTCUT], env=env,
+                       capture_output=True, text=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode or not Path(lnk).exists():
+        raise OSError((r.stderr or "").strip() or "PowerShell did not create the shortcut.")
 
 
 class DEVMODEW(ctypes.Structure):
@@ -2397,6 +2523,7 @@ class Tabs(QWidget):
 class App(QMainWindow):
     TABS = ("Settings", "Profile", "Transfer", "Backups", "Benchmarks")
     game_state = Signal(bool)
+    update_state = Signal(object)
 
     def __init__(self, root=None):
         super().__init__()
@@ -2424,6 +2551,8 @@ class App(QMainWindow):
         self.benches, self.bench_sel, self.b_items, self.b_cmp_i = None, None, [], None
         self._bench_dir, self._bench_names, self._bench_wait = None, {}, {}
         self.game_state.connect(self._on_game)
+        self.update_state.connect(self._on_update)
+        self.release, self._checking, self._downloading, self._quitting = None, False, False, False
         self.build()
         self.rescan(select=cfg.get("last_profile"))
         self.tabs.command = self.on_tab
@@ -2436,6 +2565,7 @@ class App(QMainWindow):
         self.bench_timer = QTimer(self)
         self.bench_timer.timeout.connect(self.watch_bench)
         self.bench_timer.start(2000)
+        QTimer.singleShot(1500, self.startup_checks)
         self.shortcuts = []
         for keys, fn in (("Ctrl+S", self.save), ("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo),
                          ("Ctrl+Shift+Z", self.redo), ("Ctrl+F", self.focus_search), ("F5", self.rescan),
@@ -2467,7 +2597,15 @@ class App(QMainWindow):
         root.addWidget(side)
         sv = vbox(0)
         side.setLayout(sv)
-        sv.addWidget(label("R6 Siege", "h1", margins=(18, 18, 18, 0)))
+        line = hbox(0, (0, 0, 12, 0))
+        line.addWidget(label("R6 Siege", "h1", margins=(18, 18, 18, 0)))
+        line.addStretch()
+        self.app_btn = button("\u2022\u2022\u2022", self.app_menu, "flat", height=30)
+        self.app_btn.setFixedWidth(38)
+        self.app_btn.setStyleSheet("padding: 0; font-size: 14px;")
+        self.app_btn.setToolTip("Updates and desktop shortcut")
+        line.addWidget(self.app_btn, 0, Qt.AlignBottom)
+        sv.addLayout(line)
         sv.addWidget(label("Settings Manager", tone="muted", margins=(18, 0, 18, 10)))
         self.p_filter = SearchEdit("Filter by label, tag or ID", None, lambda: (self.p_filter.clear(), self.render_sidebar()))
         self.p_filter.textEdited.connect(lambda _: self.debounce("filter", 150, self.render_sidebar))
@@ -2510,6 +2648,21 @@ class App(QMainWindow):
         header.addWidget(self.h_lock)
         main.addLayout(header)
         main.addSpacing(10)
+        # A notice with buttons, for updates and the first-run shortcut offer. It takes no space while hidden.
+        self.n_bar = QWidget()
+        wrap = vbox(0, (0, 0, 0, 8))
+        self.n_bar.setLayout(wrap)
+        card = Card(COL["accent_dim"], 10)
+        wrap.addWidget(card)
+        nl = hbox(10, (16, 8, 10, 8))
+        card.setLayout(nl)
+        self.n_text = label("", wrap=True)
+        nl.addWidget(self.n_text, 1)
+        self.n_buttons = hbox(8)
+        nl.addLayout(self.n_buttons)
+        self.n_bar.hide()
+        self.n_actions = []
+        main.addWidget(self.n_bar)
 
         self.tabs = Tabs(self.TABS, None)
         main.addWidget(self.tabs, 1)
@@ -4742,6 +4895,241 @@ class App(QMainWindow):
             text = f"{head}: {fps:.0f} fps, {than} the previous run."
         self.toast(text, "info")
 
+    # app menu, updates, desktop shortcut
+
+    def app_menu(self):
+        cfg = self.store.data["settings"]
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        self.menu_action(menu, "Check for updates", lambda: self.check_updates(manual=True))
+        auto = menu.addAction("Automatic update checks")
+        auto.setCheckable(True)
+        auto.setChecked(cfg.get("auto_update", True))
+        auto.setToolTip("Checks GitHub for a new version at startup, at most once a day.")
+        auto.toggled.connect(self.set_auto_update)
+        menu.addSeparator()
+        exe, lnk = frozen_exe(), shortcut_path()
+        have = lnk.exists()
+        make = menu.addAction("Recreate desktop shortcut" if have else "Create desktop shortcut")
+        make.triggered.connect(lambda *_: self.create_shortcut())
+        if exe is None:
+            make.setEnabled(False)
+            make.setToolTip("Needs the exe. The app is running from source.")
+        if have:
+            self.menu_action(menu, "Remove desktop shortcut", self.remove_shortcut)
+        menu.addSeparator()
+        self.menu_action(menu, "Open the releases page", lambda: webbrowser.open(RELEASES_URL))
+        menu.exec(self.app_btn.mapToGlobal(QPoint(0, self.app_btn.height())))
+
+    def set_auto_update(self, on):
+        self.store.data["settings"]["auto_update"] = bool(on)
+        try:
+            self.store.save()
+        except OSError:
+            pass
+
+    def notice(self, text, actions):
+        clear_layout(self.n_buttons)
+        self.n_text.setText(text)
+        self.n_actions = []
+        for text_, fn, kind in actions:
+            b = button(text_, fn, kind, height=30)
+            self.n_buttons.addWidget(b)
+            self.n_actions.append(b)
+        self.n_bar.show()
+
+    def close_notice(self):
+        self.n_bar.hide()
+
+    def startup_checks(self):
+        cfg = self.store.data["settings"]
+        exe = frozen_exe()
+        if exe is not None:
+            self.remove_old_exe(exe)
+            if cfg.pop("updated_to", None) == __version__:
+                self.toast(f"Updated to version {__version__}.")
+            if not cfg.get("shortcut_offered"):
+                self.notice("Add a desktop shortcut for this app? You can also do this later from the menu next to the "
+                            "app name.",
+                            [("Create shortcut", lambda: self.answer_shortcut(True), "primary"),
+                             ("No thanks", lambda: self.answer_shortcut(False), "flat")])
+        if cfg.get("auto_update", True) and time.time() - float(cfg.get("update_checked") or 0) >= UPDATE_EVERY:
+            self.check_updates(manual=False)
+
+    def remove_old_exe(self, exe, tries=15):
+        # The previous version may still be closing, so a locked file is tried again a little later.
+        old = exe.with_name(exe.name + ".old")
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            if tries > 1:
+                QTimer.singleShot(2000, lambda: self.remove_old_exe(exe, tries - 1))
+
+    def check_updates(self, manual=False):
+        if self._checking or self._downloading:
+            if manual:
+                self.toast("An update check is already running.", "info")
+            return
+        self._checking = True
+        threading.Thread(target=self._check_worker, args=(manual,), daemon=True).start()
+
+    def _check_worker(self, manual):
+        try:
+            result = ("checked", manual, fetch_latest())
+        except Exception as e:
+            result = ("check_failed", manual, e)
+        try:
+            self.update_state.emit(result)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _on_update(self, result):
+        kind, a, b = result
+        if kind == "checked":
+            self._checking = False
+            self.store.data["settings"]["update_checked"] = time.time()
+            try:
+                self.store.save()
+            except OSError:
+                pass
+            if b.key > version_tuple(__version__):
+                self.release = b
+                self.notice(f"Version {b.version} is available. You have {__version__}.",
+                            [("Update", self.start_update, "primary"),
+                             ("Release notes", lambda: webbrowser.open(b.url), None),
+                             ("Not now", self.close_notice, "flat")])
+            elif a:
+                self.toast(f"You have the latest version, {__version__}.", "info")
+        elif kind == "check_failed":
+            self._checking = False
+            if a:
+                self.toast("Could not check for updates. Check your connection and try again.", "bad")
+        elif kind == "progress":
+            if self.n_bar.isVisible() and self.release:
+                self.n_text.setText(f"Downloading version {self.release.version}: {a}%")
+        elif kind == "downloaded":
+            self.finish_update(a)
+        elif kind == "download_failed":
+            self._downloading = False
+            for btn in self.n_actions:
+                btn.setEnabled(True)
+            self.n_text.setText(f"Version {self.release.version} is available. You have {__version__}.")
+            self.toast(f"The download failed, so nothing was changed. {b}", "bad")
+
+    def start_update(self):
+        rel, exe = self.release, frozen_exe()
+        if rel is None or self._downloading:
+            return
+        if exe is None or rel.asset is None or not rel.asset.url:
+            # From source, or no exe in the release: the release page has what is needed.
+            webbrowser.open(rel.url)
+            return
+        self.commit_focus()
+        if not self.confirm_discard():
+            return
+        self._kept = dict(self.pending)
+        new = exe.with_name(exe.name + ".new")
+        try:
+            with open(new, "wb"):
+                pass
+        except OSError:
+            self.toast(f"The app cannot write to {exe.parent}, so the release page opens instead.", "info")
+            webbrowser.open(rel.url)
+            return
+        self._downloading = True
+        for btn in self.n_actions:
+            btn.setEnabled(False)
+        self.n_text.setText(f"Downloading version {rel.version}: 0%")
+        threading.Thread(target=self._download_worker, args=(rel.asset, new), daemon=True).start()
+
+    def _download_worker(self, asset, new):
+        last = [-1]
+
+        def progress(done):
+            pct = min(100, done * 100 // asset.size) if isinstance(asset.size, int) and asset.size > 0 else 0
+            if pct != last[0]:
+                last[0] = pct
+                self.update_state.emit(("progress", pct, None))
+
+        try:
+            download_asset(asset, new, progress)
+            result = ("downloaded", new, None)
+        except Exception as e:
+            result = ("download_failed", new, e)
+        try:
+            self.update_state.emit(result)
+        except (RuntimeError, TypeError):
+            pass
+
+    def finish_update(self, new):
+        exe = frozen_exe()
+        # Edits made during the download get the same ask-to-save question as before.
+        if self.pending and self.pending != getattr(self, "_kept", {}) and not self.confirm_discard():
+            new.unlink(missing_ok=True)
+            self._downloading = False
+            self.close_notice()
+            return
+        try:
+            swap_exe(exe, new)
+        except OSError as e:
+            new.unlink(missing_ok=True)
+            self._downloading = False
+            self.close_notice()
+            show_msg(self, "error", f"Could not replace the exe. The current version is unchanged.\n\n{e}")
+            return
+        self.store.data["settings"]["updated_to"] = self.release.version
+        self.save_state()
+        try:
+            launch_detached(exe, sys.argv[1:])
+        except OSError as e:
+            try:
+                unswap_exe(exe)
+            except OSError:
+                pass
+            self.store.data["settings"].pop("updated_to", None)
+            self._downloading = False
+            self.close_notice()
+            show_msg(self, "error", f"Could not start the new version. The current version is unchanged.\n\n{e}")
+            return
+        self._quitting = True
+        self.poll_timer.stop()
+        self.bench_timer.stop()
+        self.close()
+        QApplication.quit()
+
+    def answer_shortcut(self, yes):
+        self.store.data["settings"]["shortcut_offered"] = True
+        try:
+            self.store.save()
+        except OSError:
+            pass
+        self.close_notice()
+        if yes:
+            self.create_shortcut()
+
+    def create_shortcut(self):
+        exe = frozen_exe()
+        if exe is None:
+            return
+        lnk = shortcut_path()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            make_shortcut(lnk, exe)
+        except (OSError, subprocess.SubprocessError) as e:
+            QApplication.restoreOverrideCursor()
+            show_msg(self, "error", f"Could not create the desktop shortcut.\n\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.toast(f"Desktop shortcut created: {lnk.name}")
+
+    def remove_shortcut(self):
+        try:
+            shortcut_path().unlink(missing_ok=True)
+        except OSError as e:
+            show_msg(self, "error", f"Could not remove the desktop shortcut.\n\n{e}")
+            return
+        self.toast("Desktop shortcut removed.", "info")
+
     # tabs, polling, close
 
     def on_tab(self):
@@ -4797,18 +5185,25 @@ class App(QMainWindow):
                     self.reload_current()
                     self.toast("The settings file changed on disk and was reloaded.", "info")
 
+    def save_state(self):
+        self.store.data["settings"]["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
+        try:
+            self.store.save()
+        except OSError:
+            pass
+
     def closeEvent(self, e):
+        if self._quitting:
+            # An update already saved the state and started the new version.
+            e.accept()
+            return
         self.commit_focus()
         if not self.confirm_discard():
             e.ignore()
             return
         self.poll_timer.stop()
         self.bench_timer.stop()
-        self.store.data["settings"]["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
-        try:
-            self.store.save()
-        except OSError:
-            pass
+        self.save_state()
         e.accept()
 
 
